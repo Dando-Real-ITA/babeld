@@ -456,7 +456,7 @@ kernel_route(int operation, int table,
                      src, src_plen, NULL,
                      gate, ifindex, metric,
                      NULL, 0, 0, 0, NULL);
-        return kernel_route(ROUTE_ADD, table, dest, plen,
+        return kernel_route(ROUTE_ADD, newtable, dest, plen,
                             src, src_plen, NULL,
                             newgate, newifindex, newmetric,
                             NULL, 0, 0, 0, NULL);
