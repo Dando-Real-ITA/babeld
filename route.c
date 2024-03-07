@@ -477,7 +477,7 @@ change_route(int operation, const struct babel_route *route, int metric,
                         operation == ROUTE_MODIFY ? table : 0,
                         newpref_src);
 
-    if(UNLIKELY(rc > 0 &&
+    if(UNLIKELY(rc >= 0 &&
                 has_duplicate_default &&
                 is_default(newsrc->src_prefix, newsrc->src_plen) &&
                 filter_result.table &&
