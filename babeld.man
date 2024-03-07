@@ -294,9 +294,10 @@ This specifies the name of the file to which
 writes out its process id, and is equivalent to the command-line option
 .BR \-I .
 .TP
-.BI first-rule-priority " priority"
-This specifies smallest (highest) rule priority used with source-specific
-routes.  The default is 100.
+.BI duplicate_default " {" true | false }
+When defining an install filter on default route, with a pref-src and a
+table, create the same route in the master table.  Useful for src based
+return when combined with ip rule add from <src> table <table>.
 .TP
 .BI "key id" " id" " type " \c
 .RB { hmac-sha256 | blake2s128 } \c
