@@ -295,9 +295,10 @@ writes out its process id, and is equivalent to the command-line option
 .BR \-I .
 .TP
 .BI duplicate_default " {" true | false }
-When defining an install filter on default route, with a pref-src and a
-table, create the same route in the master table.  Useful for src based
-return when combined with ip rule add from <src> table <table>.
+Allows to install multiple default routes when distributed by different
+routers.  Useful for src based default routes when combined with
+"ip [-6] rule add from <src> table <table>" and
+"ip [-6] rule add to <0.0.0.0/0 or ::/0> priority 32767 table <table>.
 .TP
 .BI "key id" " id" " type " \c
 .RB { hmac-sha256 | blake2s128 } \c
