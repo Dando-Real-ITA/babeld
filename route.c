@@ -446,7 +446,7 @@ change_route(int operation, const struct babel_route *route, int metric,
     unsigned char *pref_src = NULL;
     unsigned char *newpref_src = NULL;
     unsigned int ifindex = route->neigh->ifp->ifindex;
-    int m, table, rc;
+    int m, table;
 
     m = install_filter(route->src->id,
                        route->src->prefix, route->src->plen,
@@ -470,27 +470,12 @@ change_route(int operation, const struct babel_route *route, int metric,
             newpref_src = filter_result.pref_src;
     }
 
-    rc = kernel_route(operation, table, route->src->prefix, route->src->plen,
+    return kernel_route(operation, table, route->src->prefix, route->src->plen,
                         route->src->src_prefix, route->src->src_plen, pref_src,
                         route->nexthop, ifindex,
                         metric, new_next_hop, new_ifindex, new_metric,
                         operation == ROUTE_MODIFY ? table : 0,
                         newpref_src);
-
-    if(UNLIKELY(rc >= 0 &&
-                has_duplicate_default &&
-                is_default(newsrc->src_prefix, newsrc->src_plen) &&
-                filter_result.table &&
-                newpref_src)) {
-        kernel_route(operation, export_table, route->src->prefix, route->src->plen,
-                                route->src->src_prefix, route->src->src_plen, pref_src,
-                                route->nexthop, ifindex,
-                                metric, new_next_hop, new_ifindex, new_metric,
-                                operation == ROUTE_MODIFY ? export_table : 0,
-                                newpref_src);
-    }
-
-    return rc;
 }
 
 void
