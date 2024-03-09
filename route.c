@@ -44,6 +44,7 @@ struct babel_route **routes = NULL;
 static int route_slots = 0, max_route_slots = 0;
 int kernel_metric = 0, reflect_kernel_metric = 0;
 int allow_duplicates = -1;
+int has_duplicate_default = 0;
 int diversity_factor = 256;     /* in units of 1/256 */
 
 static int smoothing_half_life = 0;
