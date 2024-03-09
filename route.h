@@ -33,6 +33,7 @@ struct babel_route {
     unsigned short smoothed_metric; /* for route selection */
     time_t smoothed_metric_time;
     short installed;
+    int installed_table;
     struct babel_route *next;
 };
 

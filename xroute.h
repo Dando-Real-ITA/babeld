@@ -28,6 +28,7 @@ struct xroute {
     unsigned short metric;
     unsigned int ifindex;
     int proto;
+    int table;
 };
 
 struct xroute_stream;
