@@ -461,6 +461,7 @@ change_route(int operation, const struct babel_route *route, int metric,
     pref_src = filter_result.pref_src;
     newpref_src = pref_src;
     table = filter_result.table ? filter_result.table : export_table;
+    newtable = table;
 
     if(newsrc) {
         m = install_filter(newsrc->id,
