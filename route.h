@@ -49,7 +49,8 @@ route_metric(const struct babel_route *route)
     return MIN(m, INFINITY);
 }
 
-struct babel_route *find_route(const unsigned char *prefix, unsigned char plen,
+struct babel_route *find_route(const unsigned char *id,
+                        const unsigned char *prefix, unsigned char plen,
                         const unsigned char *src_prefix, unsigned char src_plen,
                         struct neighbour *neigh);
 struct babel_route *find_installed_route(const unsigned char *prefix,

@@ -108,7 +108,8 @@ route_compare(const unsigned char *id,
    case, new_return is the place where to insert the new element. */
 
 static int
-find_route_slot(const unsigned char *prefix, unsigned char plen,
+find_route_slot(const unsigned char *id,
+                const unsigned char *prefix, unsigned char plen,
                 const unsigned char *src_prefix, unsigned char src_plen,
                 int *new_return)
 {
@@ -124,7 +125,7 @@ find_route_slot(const unsigned char *prefix, unsigned char plen,
 
     do {
         m = (p + g) / 2;
-        c = route_compare(prefix, plen, src_prefix, src_plen, routes[m]);
+        c = route_compare(id, prefix, plen, src_prefix, src_plen, routes[m]);
         if(c == 0)
             return m;
         else if(c < 0)
@@ -140,12 +141,13 @@ find_route_slot(const unsigned char *prefix, unsigned char plen,
 }
 
 struct babel_route *
-find_route(const unsigned char *prefix, unsigned char plen,
+find_route(const unsigned char *id,
+           const unsigned char *prefix, unsigned char plen,
            const unsigned char *src_prefix, unsigned char src_plen,
            struct neighbour *neigh)
 {
     struct babel_route *route;
-    int i = find_route_slot(prefix, plen, src_prefix, src_plen, NULL);
+    int i = find_route_slot(id, prefix, plen, src_prefix, src_plen, NULL);
 
     if(i < 0)
         return NULL;
