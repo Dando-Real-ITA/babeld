@@ -249,7 +249,8 @@ insert_route(struct babel_route *route)
 
     assert(!route->installed);
 
-    i = find_route_slot(route->src->prefix, route->src->plen,
+    i = find_route_slot(route->src->id,
+                        route->src->prefix, route->src->plen,
                         route->src->src_prefix, route->src->src_plen, &n);
 
     if(i < 0) {
@@ -297,7 +298,8 @@ flush_route(struct babel_route *route)
         lost = 1;
     }
 
-    i = find_route_slot(route->src->prefix, route->src->plen,
+    i = find_route_slot(route->src->id,
+                        route->src->prefix, route->src->plen,
                         route->src->src_prefix, route->src->src_plen, NULL);
     assert(i >= 0 && i < route_slots);
 
@@ -406,7 +408,6 @@ struct route_stream {
     int index;
     struct babel_route *next;
 };
-
 
 struct route_stream *
 route_stream(int installed)
@@ -545,7 +546,8 @@ install_route(struct babel_route *route)
         fprintf(stderr, "WARNING: installing unfeasible route "
                 "(this shouldn't happen).");
 
-    i = find_route_slot(route->src->prefix, route->src->plen,
+    i = find_route_slot(route->src->id,
+                        route->src->prefix, route->src->plen,
                         route->src->src_prefix, route->src->src_plen, NULL);
     assert(i >= 0 && i < route_slots);
 
@@ -628,7 +630,8 @@ switch_routes(struct babel_route *old, struct babel_route *new)
 
     old->installed = 0;
     new->installed = 1;
-    move_installed_route(new, find_route_slot(new->src->prefix, new->src->plen,
+    move_installed_route(new, find_route_slot(new->src->id,
+                                              new->src->prefix, new->src->plen,
                                               new->src->src_prefix,
                                               new->src->src_plen,
                                               NULL));
@@ -800,7 +803,7 @@ find_best_route(const unsigned char *prefix, unsigned char plen,
                 int feasible, struct neighbour *exclude)
 {
     struct babel_route *route, *r;
-    int i = find_route_slot(prefix, plen, src_prefix, src_plen, NULL);
+    int i = find_route_slot(id, prefix, plen, src_prefix, src_plen, NULL);
 
     if(i < 0)
         return NULL;
