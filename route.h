@@ -68,7 +68,6 @@ void route_stream_done(struct route_stream *stream);
 void install_route(struct babel_route *route);
 void uninstall_route(struct babel_route *route);
 int route_feasible(struct babel_route *route);
-int route_interferes(struct babel_route *route, struct interface *ifp);
 int update_feasible(struct source *src,
                     unsigned short seqno, unsigned short refmetric);
 void change_smoothing_half_life(int half_life);
@@ -78,8 +77,6 @@ struct babel_route *find_best_route(const unsigned char *prefix,
                                     const unsigned char *src_prefix,
                                     unsigned char src_plen,
                                     int feasible, struct neighbour *exclude);
-struct babel_route *install_best_route(const unsigned char prefix[16],
-                                 unsigned char plen);
 void update_neighbour_metric(struct neighbour *neigh, int changed);
 void update_interface_metric(struct interface *ifp);
 void update_route_metric(struct babel_route *route);

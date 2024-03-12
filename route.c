@@ -494,13 +494,14 @@ static int
 change_route(int operation, const struct babel_route *route, int metric,
              const unsigned char *new_next_hop,
              int new_ifindex, int new_metric,
-             const struct source *newsrc)
+             const struct source *newsrc,
+             int *installed_table)
 {
     struct filter_result filter_result;
     unsigned char *pref_src = NULL;
     unsigned char *newpref_src = NULL;
     unsigned int ifindex = route->neigh->ifp->ifindex;
-    int m, table, newtable;
+    int m, table, newtable, rc;
 
     m = install_filter(route->src->id,
                        route->src->prefix, route->src->plen,
@@ -526,12 +527,22 @@ change_route(int operation, const struct babel_route *route, int metric,
             newtable = filter_result.table ? filter_result.table : export_table;
     }
 
-    return kernel_route(operation, table, route->src->prefix, route->src->plen,
+    rc = kernel_route(operation, table, route->src->prefix, route->src->plen,
                         route->src->src_prefix, route->src->src_plen, pref_src,
                         route->nexthop, ifindex,
                         metric, new_next_hop, new_ifindex, new_metric,
                         operation == ROUTE_MODIFY ? newtable : 0,
                         newpref_src);
+
+    if (rc > 0 && installed_table) {
+        if (operation == ROUTE_ADD || operation == ROUTE_MODIFY) {
+            *installed_table = newtable;
+        } else {
+            *installed_table = -1;
+        }
+    }
+
+    return rc;
 }
 
 void
@@ -561,7 +572,7 @@ install_route(struct babel_route *route)
            format_prefix(route->src->prefix, route->src->plen),
            format_prefix(route->src->src_prefix, route->src->src_plen));
     rc = change_route(ROUTE_ADD, route, metric_to_kernel(route_metric(route)),
-                      NULL, 0, 0, NULL);
+                      NULL, 0, 0, NULL, &route->installed_table);
     if(rc < 0 && errno != EEXIST) {
         perror("kernel_route(ADD)");
         return;
@@ -587,7 +598,7 @@ uninstall_route(struct babel_route *route)
            format_prefix(route->src->prefix, route->src->plen),
            format_prefix(route->src->src_prefix, route->src->src_plen));
     rc = change_route(ROUTE_FLUSH, route, metric_to_kernel(route_metric(route)),
-                      NULL, 0, 0, NULL);
+                      NULL, 0, 0, NULL, &route->installed_table);
     if(rc < 0) {
         perror("kernel_route(FLUSH)");
         return;
@@ -622,13 +633,14 @@ switch_routes(struct babel_route *old, struct babel_route *new)
     rc = change_route(ROUTE_MODIFY, old, metric_to_kernel(route_metric(old)),
                       new->nexthop, new->neigh->ifp->ifindex,
                       metric_to_kernel(route_metric(new)),
-                      new->src);
+                      new->src, &new->installed_table);
     if(rc < 0) {
         perror("kernel_route(MODIFY)");
         return;
     }
 
     old->installed = 0;
+    old->installed_table = -1;
     new->installed = 1;
     move_installed_route(new, find_route_slot(new->src->id,
                                               new->src->prefix, new->src->plen,
@@ -653,7 +665,7 @@ change_route_metric(struct babel_route *route,
                format_prefix(route->src->src_prefix, route->src->src_plen),
                old_metric, new_metric);
         rc = change_route(ROUTE_MODIFY, route, old_metric, route->nexthop,
-                          route->neigh->ifp->ifindex, new_metric, NULL);
+                          route->neigh->ifp->ifindex, new_metric, NULL, &route->installed_table);
         if(rc < 0) {
             perror("kernel_route(MODIFY metric)");
             return;
