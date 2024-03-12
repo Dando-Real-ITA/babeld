@@ -1191,6 +1191,8 @@ parse_kernel_route_rta(struct rtmsg *rtm, int len, struct kernel_route *route)
         rta = RTA_NEXT(rta, len);
     }
 
+    route->table = table;
+
     for(i = 0; i < import_table_count; i++)
         if(table == import_tables[i])
             return 0;
