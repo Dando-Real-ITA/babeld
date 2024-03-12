@@ -55,7 +55,8 @@ static int two_to_the_one_over_hl = 0; /* 2^(1/hl) * 0x10000 */
    installed route, if any, at the head of the list. */
 
 static int
-route_compare(const unsigned char *prefix, unsigned char plen,
+route_compare(const unsigned char *id,
+              const unsigned char *prefix, unsigned char plen,
               const unsigned char *src_prefix, unsigned char src_plen,
               struct babel_route *route)
 {
@@ -87,6 +88,17 @@ route_compare(const unsigned char *prefix, unsigned char plen,
             return -1;
         if(src_plen > route->src->src_plen)
             return 1;
+    }
+
+    /* With has_duplicate_default, put default route in a slot by id */
+    if(has_duplicate_default &&
+       is_default(prefix, plen) &&
+       is_default(route->src->prefix, route->src->plen) &&
+       id &&
+       route->src->id) {
+        i = memcmp(id, route->src->id, 8);
+        if(i != 0)
+            return i;
     }
 
     return 0;
