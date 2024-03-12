@@ -164,10 +164,48 @@ find_route(const unsigned char *id,
 }
 
 struct babel_route *
-find_installed_route(const unsigned char *prefix, unsigned char plen,
-                     const unsigned char *src_prefix, unsigned char src_plen)
+find_installed_route(const unsigned char *id,
+                     const unsigned char *prefix, unsigned char plen,
+                     const unsigned char *src_prefix, unsigned char src_plen,
+                     int *index)
 {
-    int i = find_route_slot(prefix, plen, src_prefix, src_plen, NULL);
+    int i;
+
+    /* Case of multiple default routes, and no specific id */
+    if(has_duplicate_default &&
+       is_default(prefix, plen) &&
+       !id) {
+        /* A valid index pointer */
+        if (index) {
+            /* First call, find first route */
+            if (*index < 0) {
+                /* Binary search, will need to backtrack to to find the real first. being id checks the last for route slot, the slots should be adjacent */
+                i = find_route_slot(NULL, prefix, plen, src_prefix, src_plen, NULL);
+                /* No route found */
+                if (i < 0)
+                    return NULL;
+
+                /* If index is valid, and match parameters */
+                while (i-1 >= 0 && route_compare(NULL, prefix, plen, src_prefix, src_plen, routes[i-1]) == 0) {
+                    i--;
+                }
+                /* End of cycle, either i-1 < 0 or routes[i-1] does not match, but i was a valid match */
+                *index = i;
+            }
+
+            /* Valid index, match parameters */
+            while (*index < route_slots && route_compare(NULL, prefix, plen, src_prefix, src_plen, routes[*index]) == 0) {
+                /* The route is valid and installed */
+                if (routes[*index]->installed)
+                    return routes[(*index)++];
+                (*index)++;
+            }
+            /* No more valid routes */
+            return NULL;
+        }
+    }
+
+    i = find_route_slot(id, prefix, plen, src_prefix, src_plen, NULL);
 
     if(i >= 0 && routes[i]->installed)
         return routes[i];
