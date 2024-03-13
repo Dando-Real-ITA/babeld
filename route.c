@@ -810,7 +810,8 @@ route_acceptable(struct babel_route *route, int feasible,
    that's probably overkill. */
 
 struct babel_route *
-find_best_route(const unsigned char *prefix, unsigned char plen,
+find_best_route(const unsigned char *id,
+                const unsigned char *prefix, unsigned char plen,
                 const unsigned char *src_prefix, unsigned char src_plen,
                 int feasible, struct neighbour *exclude)
 {
@@ -946,7 +947,7 @@ update_route(const unsigned char *id,
     if(add_metric >= INFINITY)
         return NULL;
 
-    route = find_route(prefix, plen, src_prefix, src_plen, neigh);
+    route = find_route(id, prefix, plen, src_prefix, src_plen, neigh);
 
     if(refmetric >= INFINITY && !route) {
         /* Somebody's retracting a route that we've never seen. */
@@ -1011,7 +1012,7 @@ update_route(const unsigned char *id,
         route_changed(route, oldsrc, oldmetric);
         if(!lost) {
             lost = oldinstalled &&
-                find_installed_route(prefix, plen, src_prefix, src_plen) == NULL;
+                find_installed_route(oldsrc->id, prefix, plen, src_prefix, src_plen) == NULL;
         }
         if(lost)
             route_lost(oldsrc, oldmetric);
@@ -1071,7 +1072,8 @@ send_unfeasible_request(struct neighbour *neigh, int force,
                         unsigned short seqno, unsigned short metric,
                         struct source *src)
 {
-    struct babel_route *route = find_installed_route(src->prefix, src->plen,
+    struct babel_route *route = find_installed_route(src->id,
+                                                     src->prefix, src->plen,
                                                      src->src_prefix,
                                                      src->src_plen);
 
@@ -1112,7 +1114,8 @@ consider_route(struct babel_route *route)
     if(xroute && (allow_duplicates < 0 || xroute->metric >= allow_duplicates))
         return;
 
-    installed = find_installed_route(route->src->prefix, route->src->plen,
+    installed = find_installed_route(route->src->id,
+                                     route->src->prefix, route->src->plen,
                                      route->src->src_prefix,
                                      route->src->src_plen);
 
@@ -1227,7 +1230,8 @@ route_changed(struct babel_route *route,
         struct babel_route *better_route;
         /* Do this unconditionally -- microoptimisation is not worth it. */
         better_route =
-            find_best_route(route->src->prefix, route->src->plen,
+            find_best_route(route->src->id,
+                            route->src->prefix, route->src->plen,
                             route->src->src_prefix, route->src->src_plen,
                             1, NULL);
         if(better_route && route_metric(better_route) < route_metric(route))
@@ -1249,7 +1253,8 @@ void
 route_lost(struct source *src, unsigned oldmetric)
 {
     struct babel_route *new_route;
-    new_route = find_best_route(src->prefix, src->plen,
+    new_route = find_best_route(src->id,
+                                src->prefix, src->plen,
                                 src->src_prefix, src->src_plen, 1, NULL);
     if(new_route && route_feasible(new_route)) {
         consider_route(new_route);

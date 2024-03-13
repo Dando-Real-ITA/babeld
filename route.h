@@ -72,7 +72,8 @@ int update_feasible(struct source *src,
                     unsigned short seqno, unsigned short refmetric);
 void change_smoothing_half_life(int half_life);
 int route_smoothed_metric(struct babel_route *route);
-struct babel_route *find_best_route(const unsigned char *prefix,
+struct babel_route *find_best_route(const unsigned char *id,
+                                    const unsigned char *prefix,
                                     unsigned char plen,
                                     const unsigned char *src_prefix,
                                     unsigned char src_plen,
