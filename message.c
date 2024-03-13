@@ -1813,6 +1813,8 @@ send_update(struct interface *ifp, int urgent,
             const unsigned char *prefix, unsigned char plen,
             const unsigned char *src_prefix, unsigned char src_plen)
 {
+    int duplicate_i = -1;
+
     if(ifp == NULL) {
         struct interface *ifp_aux;
         struct babel_route *route;
@@ -1821,10 +1823,12 @@ send_update(struct interface *ifp, int urgent,
         if(prefix) {
             /* Since flushupdates only deals with non-wildcard interfaces, we
                need to do this now. */
-            route = find_installed_route(prefix, plen, src_prefix, src_plen);
-            if(route && route_metric(route) < INFINITY)
-                satisfy_request(prefix, plen, src_prefix, src_plen,
-                                route->src->seqno, route->src->id, NULL);
+            do {
+                route = find_installed_route(NULL, prefix, plen, src_prefix, src_plen, &duplicate_i);
+                if(route && route_metric(route) < INFINITY)
+                    satisfy_request(prefix, plen, src_prefix, src_plen,
+                                    route->src->seqno, route->src->id, NULL);
+            } while (route && has_duplicate_default && is_default(prefix, plen));
         }
         return;
     }
@@ -1836,7 +1840,7 @@ send_update(struct interface *ifp, int urgent,
         debugf("Sending update to %s for %s from %s.\n",
                ifp->name, format_prefix(prefix, plen),
                format_prefix(src_prefix, src_plen));
-        buffer_update(ifp, prefix, plen, src_prefix, src_plen);
+        buffer_update(ifp, NULL, prefix, plen, src_prefix, src_plen);
     } else if(prefix || src_prefix) {
         struct route_stream *routes;
         send_self_update(ifp);
@@ -1852,7 +1856,7 @@ send_update(struct interface *ifp, int urgent,
                                     route->src->src_plen);
                 if((src_prefix && is_ss) || (prefix && !is_ss))
                     continue;
-                buffer_update(ifp, route->src->prefix, route->src->plen,
+                buffer_update(ifp, route->src->id, route->src->prefix, route->src->plen,
                               route->src->src_prefix, route->src->src_plen);
             }
             route_stream_done(routes);
