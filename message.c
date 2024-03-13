@@ -2286,7 +2286,7 @@ send_request_resend(const unsigned char *prefix, unsigned char plen,
 {
     struct babel_route *route;
 
-    route = find_best_route(prefix, plen, src_prefix, src_plen, 0, NULL);
+    route = find_best_route(id, prefix, plen, src_prefix, src_plen, 0, NULL);
 
     if(route) {
         struct neighbour *neigh = route->neigh;
@@ -2315,65 +2315,68 @@ handle_request(struct neighbour *neigh, const unsigned char *prefix,
     struct xroute *xroute;
     struct babel_route *route;
     struct neighbour *successor = NULL;
+    int duplicate_i = -1;
 
     xroute = find_xroute(prefix, plen, src_prefix, src_plen);
-    route = find_installed_route(prefix, plen, src_prefix, src_plen);
+    route = find_installed_route(NULL, prefix, plen, src_prefix, src_plen, &duplicate_i);
 
-    if(xroute && (!route || xroute->metric <= kernel_metric)) {
-        if(hop_count > 0 && memcmp(id, myid, 8) == 0) {
-            if(seqno_compare(seqno, myseqno) > 0) {
-                if(seqno_minus(seqno, myseqno) > 100) {
-                    /* Hopelessly out-of-date request */
-                    return;
+    do {
+        if(xroute && (!route || xroute->metric <= kernel_metric)) {
+            if(hop_count > 0 && memcmp(id, myid, 8) == 0) {
+                if(seqno_compare(seqno, myseqno) > 0) {
+                    if(seqno_minus(seqno, myseqno) > 100) {
+                        /* Hopelessly out-of-date request */
+                        continue;
+                    }
+                    update_myseqno();
                 }
-                update_myseqno();
             }
+            send_update(neigh->ifp, 1, prefix, plen, src_prefix, src_plen);
+            continue;
         }
-        send_update(neigh->ifp, 1, prefix, plen, src_prefix, src_plen);
-        return;
-    }
 
-    if(route &&
-       (memcmp(id, route->src->id, 8) != 0 ||
-        seqno_compare(seqno, route->seqno) <= 0)) {
-        send_update(neigh->ifp, 1, prefix, plen, src_prefix, src_plen);
-        return;
-    }
+        if(route &&
+        (memcmp(id, route->src->id, 8) != 0 ||
+            seqno_compare(seqno, route->seqno) <= 0)) {
+            send_update(neigh->ifp, 1, prefix, plen, src_prefix, src_plen);
+            continue;
+        }
 
-    if(hop_count <= 1)
-        return;
+        if(hop_count <= 1)
+            continue;
 
-    if(route && memcmp(id, route->src->id, 8) == 0 &&
-       seqno_minus(seqno, route->seqno) > 100) {
-        /* Hopelessly out-of-date */
-        return;
-    }
+        if(route && memcmp(id, route->src->id, 8) == 0 &&
+        seqno_minus(seqno, route->seqno) > 100) {
+            /* Hopelessly out-of-date */
+            continue;
+        }
 
-    if(request_redundant(neigh->ifp, prefix, plen, src_prefix, src_plen,
-                         seqno, id))
-        return;
+        if(request_redundant(neigh->ifp, prefix, plen, src_prefix, src_plen,
+                            seqno, id))
+            continue;
 
-    /* Let's try to forward this request. */
-    if(route && route_metric(route) < INFINITY)
-        successor = route->neigh;
+        /* Let's try to forward this request. */
+        if(route && route_metric(route) < INFINITY)
+            successor = route->neigh;
 
-    if(!successor || successor == neigh) {
-        /* We were about to forward a request to its requestor.  Try to
-           find a different neighbour to forward the request to. */
-        struct babel_route *other_route;
+        if(!successor || successor == neigh) {
+            /* We were about to forward a request to its requestor.  Try to
+            find a different neighbour to forward the request to. */
+            struct babel_route *other_route;
 
-        other_route = find_best_route(prefix, plen, src_prefix, src_plen,
-                                      0, neigh);
-        if(other_route && route_metric(other_route) < INFINITY)
-            successor = other_route->neigh;
-    }
+            other_route = find_best_route(id, prefix, plen, src_prefix, src_plen,
+                                        0, neigh);
+            if(other_route && route_metric(other_route) < INFINITY)
+                successor = other_route->neigh;
+        }
 
-    if(!successor || successor == neigh)
-        /* Give up */
-        return;
+        if(!successor || successor == neigh)
+            /* Give up */
+            continue;
 
-    send_unicast_multihop_request(successor, prefix, plen, src_prefix, src_plen,
-                                  seqno, id, hop_count - 1);
-    record_resend(RESEND_REQUEST, prefix, plen, src_prefix, src_plen, seqno, id,
-                  neigh->ifp, 0);
+        send_unicast_multihop_request(successor, prefix, plen, src_prefix, src_plen,
+                                    seqno, id, hop_count - 1);
+        record_resend(RESEND_REQUEST, prefix, plen, src_prefix, src_plen, seqno, id,
+                    neigh->ifp, 0);
+    } while (route && has_duplicate_default && is_default(prefix, plen));
 }
