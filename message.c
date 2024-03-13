@@ -1761,6 +1761,7 @@ schedule_update_flush(struct interface *ifp, int urgent)
 
 static void
 buffer_update(struct interface *ifp,
+              const unsigned char *id,
               const unsigned char *prefix, unsigned char plen,
               const unsigned char *src_prefix, unsigned char src_plen)
 {
@@ -1797,6 +1798,10 @@ buffer_update(struct interface *ifp,
     memcpy(ifp->buffered_updates[ifp->num_buffered_updates].src_prefix,
            src_prefix, 16);
     ifp->buffered_updates[ifp->num_buffered_updates].src_plen = src_plen;
+    if (id) {
+        memcpy(ifp->buffered_updates[ifp->num_buffered_updates].id,
+        id, 8);
+    }
     ifp->num_buffered_updates++;
 }
 
