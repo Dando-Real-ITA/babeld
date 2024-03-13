@@ -2364,7 +2364,7 @@ handle_request(struct neighbour *neigh, const unsigned char *prefix,
             find a different neighbour to forward the request to. */
             struct babel_route *other_route;
 
-            other_route = find_best_route(id, prefix, plen, src_prefix, src_plen,
+            other_route = find_best_route(route->src->id, prefix, plen, src_prefix, src_plen,
                                         0, neigh);
             if(other_route && route_metric(other_route) < INFINITY)
                 successor = other_route->neigh;
