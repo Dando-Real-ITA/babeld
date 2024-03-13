@@ -522,9 +522,10 @@ change_route(int operation, const struct babel_route *route, int metric,
                            newsrc->prefix, newsrc->plen,
                            newsrc->src_prefix, newsrc->src_plen,
                            new_ifindex, &filter_result);
-        if(m < INFINITY && filter_result.pref_src)
+        if(m < INFINITY && filter_result.pref_src) {
             newpref_src = filter_result.pref_src;
             newtable = filter_result.table ? filter_result.table : export_table;
+        }
     }
 
     rc = kernel_route(operation, table, route->src->prefix, route->src->plen,
