@@ -1621,7 +1621,8 @@ flushupdates(struct interface *ifp)
     const unsigned char *last_src_prefix = NULL;
     unsigned char last_plen = 0xFF;
     unsigned char last_src_plen = 0xFF;
-    int i;
+    const unsigned char *last_id = NULL;
+    int i, duplicate_i;
 
     if(ifp == NULL) {
         struct interface *ifp_aux;
@@ -1647,9 +1648,12 @@ flushupdates(struct interface *ifp)
         /* In order to send fewer update messages, we want to send updates
            with the same router-id together, with IPv6 going out before IPv4. */
 
+        duplicate_i = -1;
         for(i = 0; i < n; i++) {
-            route = find_installed_route(b[i].prefix, b[i].plen,
-                                         b[i].src_prefix, b[i].src_plen);
+            route = find_installed_route(b[i].id,
+                                         b[i].prefix, b[i].plen,
+                                         b[i].src_prefix, b[i].src_plen,
+                                         &duplicate_i);
             if(route)
                 memcpy(b[i].id, route->src->id, 8);
             else
@@ -1667,13 +1671,17 @@ flushupdates(struct interface *ifp)
                b[i].plen == last_plen &&
                b[i].src_plen == last_src_plen &&
                memcmp(b[i].prefix, last_prefix, 16) == 0 &&
-               memcmp(b[i].src_prefix, last_src_prefix, 16) == 0)
+               memcmp(b[i].src_prefix, last_src_prefix, 16) == 0 &&
+               ( !has_duplicate_default ||
+                 ( !is_default(b[i].prefix, b[i].plen) ||
+                   memcmp(b[i].id, last_id, 8) == 0 ) ) )
                 continue;
 
             xroute = find_xroute(b[i].prefix, b[i].plen,
                                  b[i].src_prefix, b[i].src_plen);
-            route = find_installed_route(b[i].prefix, b[i].plen,
-                                         b[i].src_prefix, b[i].src_plen);
+            route = find_installed_route(b[i].id,
+                                         b[i].prefix, b[i].plen,
+                                         b[i].src_prefix, b[i].src_plen, NULL);
 
             if(xroute && (!route || xroute->metric <= kernel_metric)) {
                 really_send_update(ifp, myid,
@@ -1684,6 +1692,7 @@ flushupdates(struct interface *ifp)
                 last_plen = xroute->plen;
                 last_src_prefix = xroute->src_prefix;
                 last_src_plen = xroute->src_plen;
+                last_id = myid;
             } else if(route) {
                 unsigned short metric;
                 unsigned short seqno;
@@ -1711,6 +1720,7 @@ flushupdates(struct interface *ifp)
                 last_plen = route->src->plen;
                 last_src_prefix = route->src->src_prefix;
                 last_src_plen = route->src->src_plen;
+                last_id = route->src->id;
             } else {
             /* There's no route for this prefix.  This can happen shortly
                after an xroute has been retracted, so send a retraction. */
