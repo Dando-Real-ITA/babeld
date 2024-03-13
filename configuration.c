@@ -1026,6 +1026,7 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
               strcmp(token, "daemonise") == 0 ||
               strcmp(token, "skip-kernel-setup") == 0 ||
               strcmp(token, "ipv6-subtrees") == 0 ||
+              strcmp(token, "duplicate_default") == 0 ||
               strcmp(token, "reflect-kernel-metric") == 0) {
         int b;
         c = getbool(c, &b, gnc, closure);
@@ -1042,6 +1043,8 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
             skip_kernel_setup = b;
         else if(strcmp(token, "ipv6-subtrees") == 0)
             has_ipv6_subtrees = b;
+        else if(strcmp(token, "duplicate_default") == 0)
+            has_duplicate_default = b;
         else if(strcmp(token, "reflect-kernel-metric") == 0)
             reflect_kernel_metric = b;
         else
@@ -1481,7 +1484,7 @@ update_filter(struct filter *f, struct filter *newf)
         if(filter_match(f, newf->id, newf->prefix, newf->plen, newf->src_prefix, newf->src_plen,
                         newf->neigh, newf->ifindex, newf->proto)) {
             f->action.add_metric = newf->action.add_metric;
-            // f->action.table = newf->action.table;
+            f->action.table = newf->action.table;
             // memcpy(f->action.pref_src, newf->action.pref_src, 16);
             return -1;
         }

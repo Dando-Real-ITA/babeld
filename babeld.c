@@ -1018,7 +1018,7 @@ dump_route(FILE *out, struct babel_route *route)
         NULL : route->nexthop;
 
     fprintf(out, "%s from %s metric %d (%d) refmetric %d id %s "
-            "seqno %d age %d via %s neigh %s%s%s%s\n",
+            "seqno %d age %d via %s neigh %s%s%s%s table %d\n",
             format_prefix(route->src->prefix, route->src->plen),
             format_prefix(route->src->src_prefix, route->src->src_plen),
             route_metric(route), route_smoothed_metric(route), route->refmetric,
@@ -1030,7 +1030,8 @@ dump_route(FILE *out, struct babel_route *route)
             nexthop ? " nexthop " : "",
             nexthop ? format_address(nexthop) : "",
             route->installed ? " (installed)" :
-            route_feasible(route) ? " (feasible)" : "");
+            route_feasible(route) ? " (feasible)" : "",
+            route->installed_table);
 }
 
 static void

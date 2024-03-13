@@ -33,6 +33,7 @@ struct kernel_route {
     int metric;
     unsigned int ifindex;
     int proto;
+    int table;
     unsigned char gw[16];
 };
 

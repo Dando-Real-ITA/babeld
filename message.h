@@ -76,7 +76,6 @@ int send_challenge_reply(struct neighbour *neigh,
 void send_multicast_hello(struct interface *ifp, unsigned interval, int force);
 void send_unicast_hello(struct neighbour *neigh, unsigned interval, int force);
 void send_hello(struct interface *ifp);
-void flush_unicast(int dofree);
 void send_update(struct interface *ifp, int urgent,
                  const unsigned char *prefix, unsigned char plen,
                  const unsigned char *src_prefix, unsigned char src_plen);

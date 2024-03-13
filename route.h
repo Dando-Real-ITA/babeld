@@ -33,13 +33,14 @@ struct babel_route {
     unsigned short smoothed_metric; /* for route selection */
     time_t smoothed_metric_time;
     short installed;
+    int installed_table;
     struct babel_route *next;
 };
 
 struct route_stream;
 
 extern struct babel_route **routes;
-extern int kernel_metric, allow_duplicates, reflect_kernel_metric;
+extern int kernel_metric, allow_duplicates, reflect_kernel_metric, has_duplicate_default;
 
 static inline int
 route_metric(const struct babel_route *route)
@@ -48,12 +49,14 @@ route_metric(const struct babel_route *route)
     return MIN(m, INFINITY);
 }
 
-struct babel_route *find_route(const unsigned char *prefix, unsigned char plen,
+struct babel_route *find_route(const unsigned char *id,
+                        const unsigned char *prefix, unsigned char plen,
                         const unsigned char *src_prefix, unsigned char src_plen,
                         struct neighbour *neigh);
-struct babel_route *find_installed_route(const unsigned char *prefix,
-                        unsigned char plen, const unsigned char *src_prefix,
-                        unsigned char src_plen);
+struct babel_route *find_installed_route(const unsigned char *id,
+                        const unsigned char *prefix, unsigned char plen,
+                        const unsigned char *src_prefix, unsigned char src_plen,
+                        int *index);
 int installed_routes_estimate(void);
 void flush_route(struct babel_route *route);
 void flush_all_routes(void);
@@ -65,18 +68,16 @@ void route_stream_done(struct route_stream *stream);
 void install_route(struct babel_route *route);
 void uninstall_route(struct babel_route *route);
 int route_feasible(struct babel_route *route);
-int route_interferes(struct babel_route *route, struct interface *ifp);
 int update_feasible(struct source *src,
                     unsigned short seqno, unsigned short refmetric);
 void change_smoothing_half_life(int half_life);
 int route_smoothed_metric(struct babel_route *route);
-struct babel_route *find_best_route(const unsigned char *prefix,
+struct babel_route *find_best_route(const unsigned char *id,
+                                    const unsigned char *prefix,
                                     unsigned char plen,
                                     const unsigned char *src_prefix,
                                     unsigned char src_plen,
                                     int feasible, struct neighbour *exclude);
-struct babel_route *install_best_route(const unsigned char prefix[16],
-                                 unsigned char plen);
 void update_neighbour_metric(struct neighbour *neigh, int changed);
 void update_interface_metric(struct interface *ifp);
 void update_route_metric(struct babel_route *route);
