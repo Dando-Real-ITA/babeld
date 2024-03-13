@@ -191,7 +191,7 @@ flush_xroute(struct xroute *xroute, int send_updates)
         maxxroutes = n;
     }
 
-    route = find_best_route(prefix, plen, src_prefix, src_plen, 1, NULL);
+    route = find_best_route(NULL, prefix, plen, src_prefix, src_plen, 1, NULL);
     if(route != NULL && route_metric(route) < INFINITY &&
        route_feasible(route)) {
         install_route(route);
@@ -371,8 +371,8 @@ modify_xroute(int i, struct kernel_route *kroute, int update) {
 static void
 flush_duplicate_route(struct kernel_route *kroute) {
     struct babel_route *route;
-    route = find_installed_route(kroute->prefix, kroute->plen,
-                                 kroute->src_prefix, kroute->src_plen);
+    route = find_installed_route(NULL, kroute->prefix, kroute->plen,
+                                 kroute->src_prefix, kroute->src_plen, NULL);
     if(route) {
         if(allow_duplicates < 0 || kroute->metric < allow_duplicates)
             uninstall_route(route);

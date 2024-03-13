@@ -1012,7 +1012,7 @@ update_route(const unsigned char *id,
         route_changed(route, oldsrc, oldmetric);
         if(!lost) {
             lost = oldinstalled &&
-                find_installed_route(oldsrc->id, prefix, plen, src_prefix, src_plen) == NULL;
+                find_installed_route(oldsrc->id, prefix, plen, src_prefix, src_plen, NULL) == NULL;
         }
         if(lost)
             route_lost(oldsrc, oldmetric);
@@ -1074,8 +1074,8 @@ send_unfeasible_request(struct neighbour *neigh, int force,
 {
     struct babel_route *route = find_installed_route(src->id,
                                                      src->prefix, src->plen,
-                                                     src->src_prefix,
-                                                     src->src_plen);
+                                                     src->src_prefix, src->src_plen,
+                                                     NULL);
 
     if(seqno_minus(src->seqno, seqno) > 100) {
         /* Probably a source that lost its seqno.  Let it time-out. */
@@ -1116,8 +1116,8 @@ consider_route(struct babel_route *route)
 
     installed = find_installed_route(route->src->id,
                                      route->src->prefix, route->src->plen,
-                                     route->src->src_prefix,
-                                     route->src->src_plen);
+                                     route->src->src_prefix, route->src->src_plen,
+                                     NULL);
 
     if(installed == NULL)
         goto install;
