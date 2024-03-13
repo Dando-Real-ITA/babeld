@@ -371,8 +371,11 @@ modify_xroute(int i, struct kernel_route *kroute, int update) {
 static void
 flush_duplicate_route(struct kernel_route *kroute) {
     struct babel_route *route;
-    route = find_installed_route(NULL, kroute->prefix, kroute->plen,
-                                 kroute->src_prefix, kroute->src_plen, NULL);
+    int duplicate_i = -1;
+    do {
+        route = find_installed_route(NULL, kroute->prefix, kroute->plen,
+                                    kroute->src_prefix, kroute->src_plen, &duplicate_i);
+    } while (route && has_duplicate_default && is_default(kroute->prefix, kroute->plen) && route->installed_table != kroute->table);
     if(route) {
         if(allow_duplicates < 0 || kroute->metric < allow_duplicates)
             uninstall_route(route);
