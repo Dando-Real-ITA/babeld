@@ -535,7 +535,7 @@ change_route(int operation, const struct babel_route *route, int metric,
                         operation == ROUTE_MODIFY ? newtable : 0,
                         newpref_src);
 
-    if (rc > 0 && installed_table) {
+    if (rc >= 0 && installed_table) {
         if (operation == ROUTE_ADD || operation == ROUTE_MODIFY) {
             *installed_table = newtable;
         } else {

@@ -241,7 +241,7 @@ local_notify_route_1(struct local_socket *s, struct babel_route *route, int kind
                                            route->src->src_plen);
 
     rc = snprintf(buf, 512,
-                  "%s route %lx prefix %s from %s installed %s table %d"
+                  "%s route %lx prefix %s from %s installed %s table %d "
                   "id %s metric %d refmetric %d via %s if %s\n",
                   local_kind(kind),
                   (unsigned long)route,
