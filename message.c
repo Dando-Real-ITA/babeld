@@ -2318,9 +2318,9 @@ handle_request(struct neighbour *neigh, const unsigned char *prefix,
     int duplicate_i = -1;
 
     xroute = find_xroute(prefix, plen, src_prefix, src_plen);
-    route = find_installed_route(NULL, prefix, plen, src_prefix, src_plen, &duplicate_i);
 
     do {
+        route = find_installed_route(NULL, prefix, plen, src_prefix, src_plen, &duplicate_i);
         if(xroute && (!route || xroute->metric <= kernel_metric)) {
             if(hop_count > 0 && memcmp(id, myid, 8) == 0) {
                 if(seqno_compare(seqno, myseqno) > 0) {
