@@ -1831,7 +1831,7 @@ send_update(struct interface *ifp, int urgent,
                            format_prefix(prefix, plen),
                            is_ss ? " src " : "",
                            is_ss ? format_prefix(src_prefix, src_plen) : "",
-                           route->src->id, route->src->seqno);
+                           format_eui64(route->src->id), route->src->seqno);
                     satisfy_request(prefix, plen, src_prefix, src_plen,
                                     route->src->seqno, route->src->id, NULL);
                 }
@@ -1858,7 +1858,7 @@ send_update(struct interface *ifp, int urgent,
                            is_ss ? " src " : "",
                            is_ss ? format_prefix(src_prefix, src_plen) : "",
                            ifp->name,
-                           route->src->id, route->src->seqno);
+                           format_eui64(route->src->id), route->src->seqno);
                     buffer_update(ifp, route->src->id, prefix, plen, src_prefix, src_plen);
                 }
             } while (route);
