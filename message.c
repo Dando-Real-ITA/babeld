@@ -1840,7 +1840,17 @@ send_update(struct interface *ifp, int urgent,
         debugf("Sending update to %s for %s from %s.\n",
                ifp->name, format_prefix(prefix, plen),
                format_prefix(src_prefix, src_plen));
-        buffer_update(ifp, NULL, prefix, plen, src_prefix, src_plen);
+        if (has_duplicate_default && is_default(prefix, plen)) {
+            duplicate_i = -1;
+            struct babel_route *route;
+            do {
+                route = find_installed_route(NULL, prefix, plen, src_prefix, src_plen, &duplicate_i);
+                if(route)
+                    buffer_update(ifp, route->src->id, prefix, plen, src_prefix, src_plen);
+            } while (route);
+        } else {
+            buffer_update(ifp, NULL, prefix, plen, src_prefix, src_plen);
+        }
     } else if(prefix || src_prefix) {
         struct route_stream *routes;
         send_self_update(ifp);
