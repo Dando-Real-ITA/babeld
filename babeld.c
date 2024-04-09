@@ -536,7 +536,7 @@ main(int argc, char **argv)
         gettime(&now);
         send_hello(ifp);
         if(ifp->key != NULL) {
-            /* Try to get ihu to trigger neigh add. */
+            /* Try to get ihu to trigger complete challenge and neigh add. */
             flushupdates(ifp);
             flushbuf(&ifp->buf, ifp);
             usleep(roughly(1000000));
@@ -549,9 +549,19 @@ main(int argc, char **argv)
     FOR_ALL_INTERFACES(ifp) {
         if(!if_up(ifp))
             continue;
-        usleep(roughly(10000));
+        if(ifp->key != NULL) {
+            usleep(roughly(1000000));
+        } else {
+            usleep(roughly(10000));
+        }
         gettime(&now);
         send_hello(ifp);
+        if(ifp->key != NULL) {
+            /* Try to get ihu to trigger complete challenge and neigh add. */
+            flushupdates(ifp);
+            flushbuf(&ifp->buf, ifp);
+            usleep(roughly(1000000));
+        }
         send_wildcard_retraction(ifp);
         send_self_update(ifp);
         send_multicast_request(ifp, NULL, 0, NULL, 0);
