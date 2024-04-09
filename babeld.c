@@ -535,6 +535,12 @@ main(int argc, char **argv)
         usleep(roughly(10000));
         gettime(&now);
         send_hello(ifp);
+        if(ifp->key != NULL) {
+            /* Try to get ihu to trigger neigh add. */
+            flushupdates(ifp);
+            flushbuf(&ifp->buf, ifp);
+            usleep(roughly(10000));
+        }
         send_wildcard_retraction(ifp);
         flushupdates(ifp);
         flushbuf(&ifp->buf, ifp);
@@ -546,6 +552,12 @@ main(int argc, char **argv)
         usleep(roughly(10000));
         gettime(&now);
         send_hello(ifp);
+        if(ifp->key != NULL) {
+            /* Try to get ihu to trigger neigh add. */
+            flushupdates(ifp);
+            flushbuf(&ifp->buf, ifp);
+            usleep(roughly(10000));
+        }
         send_wildcard_retraction(ifp);
         send_self_update(ifp);
         send_multicast_request(ifp, NULL, 0, NULL, 0);
