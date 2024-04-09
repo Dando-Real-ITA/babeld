@@ -533,7 +533,7 @@ main(int argc, char **argv)
     if(delay_init_flow) {
         /* Send hellos to trigger challenge start */
         init_hello();
-        timeval_add_msec(&delay_init_timeout, &now, roughly(10000));
+        timeval_add_msec(&delay_init_timeout, &now, roughly(30000));
     } else {
         init_flow();
     }
