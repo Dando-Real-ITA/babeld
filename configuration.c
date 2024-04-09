@@ -1268,6 +1268,7 @@ parse_config_line(int c, gnc_t gnc, void *closure,
             goto fail;
         add_key(key->id, key->type, key->len, key->value);
         free(key);
+        delay_init_flow = 1;
     } else if(strcmp(token, "check_xroutes") == 0) {
         c = skip_eol(c, gnc, closure);
         if(c < -1 || !action_return)

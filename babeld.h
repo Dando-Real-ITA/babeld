@@ -87,6 +87,7 @@ extern int default_wireless_hello_interval, default_wired_hello_interval;
 extern int resend_delay;
 extern int random_id;
 extern int skip_kernel_setup;
+extern int delay_init_flow;
 extern int do_daemonise;
 extern const char *logfile, *pidfile, *state_file;
 extern int link_detect;
