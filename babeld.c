@@ -70,6 +70,7 @@ int resend_delay = -1;
 int random_id = 0;
 int do_daemonise = 0;
 int skip_kernel_setup = 0;
+int delay_init_flow = 0;
 const char *logfile = NULL,
     *pidfile = "/var/run/babeld.pid",
     *state_file = "/var/lib/babel-state";
@@ -98,6 +99,8 @@ static volatile sig_atomic_t exiting = 0, dumping = 0, reopening = 0;
 static int accept_local_connections(void);
 static void init_signals(void);
 static void dump_tables(FILE *out);
+static void init_hello();
+static void init_flow();
 
 static void
 kernel_addr_notify(int add, struct kernel_addr *addr, void *closure)
@@ -128,6 +131,7 @@ main(int argc, char **argv)
     void *vrc;
     unsigned int seed;
     struct interface *ifp;
+    struct timeval delay_init_timeout;
 
     gettime(&now);
 
@@ -526,31 +530,12 @@ main(int argc, char **argv)
     expiry_time = now.tv_sec + roughly(30);
     source_expiry_time = now.tv_sec + roughly(300);
 
-    /* Make some noise so that others notice us, and send retractions in
-       case we were restarted recently */
-    FOR_ALL_INTERFACES(ifp) {
-        if(!if_up(ifp))
-            continue;
-        /* Apply jitter before we send the first message. */
-        usleep(roughly(10000));
-        gettime(&now);
-        send_hello(ifp);
-        send_wildcard_retraction(ifp);
-        flushupdates(ifp);
-        flushbuf(&ifp->buf, ifp);
-    }
-
-    FOR_ALL_INTERFACES(ifp) {
-        if(!if_up(ifp))
-            continue;
-        usleep(roughly(10000));
-        gettime(&now);
-        send_hello(ifp);
-        send_wildcard_retraction(ifp);
-        send_self_update(ifp);
-        send_multicast_request(ifp, NULL, 0, NULL, 0);
-        flushupdates(ifp);
-        flushbuf(&ifp->buf, ifp);
+    if(delay_init_flow) {
+        /* Send hellos to trigger challenge start */
+        init_hello();
+        timeval_add_msec(&delay_init_timeout, &now, roughly(10000));
+    } else {
+        init_flow();
     }
 
     debugf("Entering main loop.\n");
@@ -702,6 +687,11 @@ main(int argc, char **argv)
         if(timeval_compare(&check_interfaces_timeout, &now) < 0) {
             check_interfaces();
             schedule_interfaces_check(30000, 1);
+        }
+
+        if(delay_init_flow && timeval_compare(&delay_init_timeout, &now) < 0) {
+            init_flow();
+            delay_init_flow = 0;
         }
 
         if(now.tv_sec >= expiry_time) {
@@ -1089,6 +1079,45 @@ dump_tables(FILE *out)
     }
 
     fflush(out);
+}
+
+static void
+init_hello() {
+    struct interface *ifp;
+
+    /* Make some noise so that others notice us, and send retractions in
+       case we were restarted recently */
+    FOR_ALL_INTERFACES(ifp) {
+        if(!if_up(ifp))
+            continue;
+        /* Apply jitter before we send the first message. */
+        usleep(roughly(10000));
+        gettime(&now);
+        send_hello(ifp);
+        send_wildcard_retraction(ifp);
+        flushupdates(ifp);
+        flushbuf(&ifp->buf, ifp);
+    }
+}
+
+static void
+init_flow() {
+    struct interface *ifp;
+
+    init_hello();
+
+    FOR_ALL_INTERFACES(ifp) {
+        if(!if_up(ifp))
+            continue;
+        usleep(roughly(10000));
+        gettime(&now);
+        send_hello(ifp);
+        send_wildcard_retraction(ifp);
+        send_self_update(ifp);
+        send_multicast_request(ifp, NULL, 0, NULL, 0);
+        flushupdates(ifp);
+        flushbuf(&ifp->buf, ifp);
+    }
 }
 
 int
