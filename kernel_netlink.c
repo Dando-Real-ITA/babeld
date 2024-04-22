@@ -1063,7 +1063,7 @@ kernel_route(int operation, int table,
     rtm->rtm_dst_len = ipv4 ? plen - 96 : plen;
     if(use_src)
         rtm->rtm_src_len = src_plen;
-    rtm->rtm_table = table;
+    // rtm->rtm_table = table;
     rtm->rtm_scope = RT_SCOPE_UNIVERSE;
     if(metric < KERNEL_INFINITY) {
         rtm->rtm_type = RTN_UNICAST;
@@ -1074,6 +1074,11 @@ kernel_route(int operation, int table,
     rtm->rtm_protocol = RTPROT_BABEL;
 
     rta = RTM_RTA(rtm);
+
+    rta = RTA_NEXT(rta, len);
+    rta->rta_len = RTA_LENGTH(sizeof(int));
+    rta->rta_type = RTA_TABLE;
+    *(int*)RTA_DATA(rta) = table;
 
     if(ipv4) {
         rta = RTA_NEXT(rta, len);
@@ -1304,15 +1309,24 @@ kernel_dump(int operation, struct kernel_filter *filter)
     }
 
     for(i = 0; i < 2; i++) {
-        struct rtmsg msg = {
-            .rtm_family = families[i]
-        };
+        struct {
+            struct rtmsg        msg;
+            char                attrbuf[512];
+        } req;
+        memset(&req, 0, sizeof(req));
+
+        req.msg.rtm_family = families[i];
+        struct rtattr *rta = RTM_RTA(&req);
+        rta->rta_len = RTA_LENGTH(sizeof(int));
+        rta->rta_type = RTA_TABLE;
+
+        int len = NLMSG_ALIGN(sizeof(struct rtmsg)) + RTA_LENGTH(sizeof(int));
 
         if(operation & CHANGE_ROUTE) {
             for (j = 0; j < import_table_count; j++) {
-                msg.rtm_table = import_tables[j];
-
-                rc = netlink_send_dump(RTM_GETROUTE, &msg, sizeof(msg));
+                // msg.rtm_table = import_tables[j];
+                *(int*)RTA_DATA(rta) = import_tables[j];
+                rc = netlink_send_dump(RTM_GETROUTE, &req, len);
                 if(rc < 0)
                     return -1;
 
