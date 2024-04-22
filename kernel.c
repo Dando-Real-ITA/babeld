@@ -104,7 +104,7 @@ read_random_bytes(void *buf, int len)
 int
 add_import_table(int table)
 {
-    if(table < 0 || table > 0xFFFF) return -1;
+    if(table < 0 || table > 0xFFFFFFFF) return -1;
     if(import_table_count > MAX_IMPORT_TABLES - 1) return -2;
     import_tables[import_table_count++] = table;
     return 0;

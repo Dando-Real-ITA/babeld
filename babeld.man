@@ -298,7 +298,7 @@ writes out its process id, and is equivalent to the command-line option
 Allows to install multiple default routes when distributed by different
 routers.  Useful for src based default routes when combined with
 "ip [-6] rule add from <src> table <table>" and
-"ip [-6] rule add to <0.0.0.0/0 or ::/0> priority 32767 table <table>.
+"ip [-6] rule add to <0.0.0.0/0 or ::/0> priority 32767 table <table>".
 .TP
 .BI "key id" " id" " type " \c
 .RB { hmac-sha256 | blake2s128 } \c
