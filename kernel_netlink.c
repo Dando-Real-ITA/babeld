@@ -1063,7 +1063,7 @@ kernel_route(int operation, int table,
     rtm->rtm_dst_len = ipv4 ? plen - 96 : plen;
     if(use_src)
         rtm->rtm_src_len = src_plen;
-    // rtm->rtm_table = table;
+    rtm->rtm_table = table < 256 ? table : RT_TABLE_UNSPEC;
     rtm->rtm_scope = RT_SCOPE_UNIVERSE;
     if(metric < KERNEL_INFINITY) {
         rtm->rtm_type = RTN_UNICAST;
@@ -1075,10 +1075,12 @@ kernel_route(int operation, int table,
 
     rta = RTM_RTA(rtm);
 
-    rta = RTA_NEXT(rta, len);
-    rta->rta_len = RTA_LENGTH(sizeof(int));
-    rta->rta_type = RTA_TABLE;
-    *(int*)RTA_DATA(rta) = table;
+    if (table >= 256) {
+        rta = RTA_NEXT(rta, len);
+        rta->rta_len = RTA_LENGTH(sizeof(int));
+        rta->rta_type = RTA_TABLE;
+        *(int*)RTA_DATA(rta) = table;
+    }
 
     if(ipv4) {
         rta = RTA_NEXT(rta, len);
@@ -1311,11 +1313,12 @@ kernel_dump(int operation, struct kernel_filter *filter)
     for(i = 0; i < 2; i++) {
         struct {
             struct rtmsg        msg;
-            char                attrbuf[512];
+            char                attrbuf[128];
         } req;
         memset(&req, 0, sizeof(req));
 
         req.msg.rtm_family = families[i];
+
         struct rtattr *rta = RTM_RTA(&req);
         rta->rta_len = RTA_LENGTH(sizeof(int));
         rta->rta_type = RTA_TABLE;
@@ -1324,8 +1327,15 @@ kernel_dump(int operation, struct kernel_filter *filter)
 
         if(operation & CHANGE_ROUTE) {
             for (j = 0; j < import_table_count; j++) {
-                // msg.rtm_table = import_tables[j];
-                *(int*)RTA_DATA(rta) = import_tables[j];
+                req.msg.rtm_table = import_tables[j] < 256 ? import_tables[j] : RT_TABLE_UNSPEC;
+
+                if (import_tables[j] >= 256) {
+                    *(int*)RTA_DATA(rta) = import_tables[j];
+                    len = NLMSG_ALIGN(sizeof(struct rtmsg)) + RTA_LENGTH(sizeof(int));
+                } else {
+                    len = NLMSG_ALIGN(sizeof(struct rtmsg));
+                }
+
                 rc = netlink_send_dump(RTM_GETROUTE, &req, len);
                 if(rc < 0)
                     return -1;
