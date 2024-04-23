@@ -503,7 +503,7 @@ parse_filter(int c, gnc_t gnc, void *closure, struct filter **filter_return)
             int table;
             c = getint(c, &table, gnc, closure);
             if(c < -1) goto error;
-            if(table <= 0 || table > INFINITY)
+            if(table <= 0 || table > 0xFFFFFFFF)
                 goto error;
             filter->action.table = table;
         } else if(strcmp(token, "pref-src") == 0) {

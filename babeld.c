@@ -247,7 +247,7 @@ main(int argc, char **argv)
         }
         case 't':
             export_table = parse_nat(optarg);
-            if(export_table < 0 || export_table > 0xFFFF)
+            if(export_table < 0 || export_table > 0xFFFFFFFF)
                 goto usage;
             break;
         case 'T':
