@@ -65,7 +65,7 @@ struct kernel_filter {
 #define CHANGE_RULE  (1 << 3)
 
 #ifndef MAX_IMPORT_TABLES
-#define MAX_IMPORT_TABLES 100
+#define MAX_IMPORT_TABLES 2000
 #endif
 
 extern int export_table, import_tables[MAX_IMPORT_TABLES], import_table_count;
