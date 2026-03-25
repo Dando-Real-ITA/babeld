@@ -1018,9 +1018,23 @@ dump_route(FILE *out, struct babel_route *route)
     const unsigned char *nexthop =
         memcmp(route->nexthop, route->neigh->address, 16) == 0 ?
         NULL : route->nexthop;
+    char tables_buf[384];
+    int i, written = 0;
+
+    /* Build tables string from array */
+    tables_buf[0] = '\0';
+    if(route->installed_table_count > 0) {
+        for(i = 0; i < route->installed_table_count && written < 370; i++) {
+            int len = snprintf(tables_buf + written, 384 - written, 
+                             "%s%u", i > 0 ? "," : "", 
+                             route->installed_tables[i]);
+            if(len > 0)
+                written += len;
+        }
+    }
 
     fprintf(out, "%s from %s metric %d (%d) refmetric %d id %s "
-            "seqno %d age %d via %s neigh %s%s%s%s table %d\n",
+            "seqno %d age %d via %s neigh %s%s%s%s tables %s\n",
             format_prefix(route->src->prefix, route->src->plen),
             format_prefix(route->src->src_prefix, route->src->src_plen),
             route_metric(route), route_smoothed_metric(route), route->refmetric,
@@ -1033,7 +1047,7 @@ dump_route(FILE *out, struct babel_route *route)
             nexthop ? format_address(nexthop) : "",
             route->installed ? " (installed)" :
             route_feasible(route) ? " (feasible)" : "",
-            route->installed_table);
+            tables_buf);
 }
 
 static void
