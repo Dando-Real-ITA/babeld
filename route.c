@@ -496,13 +496,15 @@ change_route(int operation, const struct babel_route *route, int metric,
              const unsigned char *new_next_hop,
              int new_ifindex, int new_metric,
              const struct source *newsrc,
-             int *installed_table)
+             int *installed_tables, int *installed_table_count)
 {
-    struct filter_result filter_result;
+    struct filter_result filter_result, new_filter_result;
     unsigned char *pref_src = NULL;
     unsigned char *newpref_src = NULL;
     unsigned int ifindex = route->neigh->ifp->ifindex;
-    int m, table, newtable, rc;
+    int m, i, rc, first_rc = 0;
+    int tables_to_use[MAX_TABLES_PER_FILTER];
+    int num_tables = 0;
 
     m = install_filter(route->src->id,
                        route->src->prefix, route->src->plen,
@@ -515,34 +517,72 @@ change_route(int operation, const struct babel_route *route, int metric,
 
     pref_src = filter_result.pref_src;
     newpref_src = pref_src;
-    table = filter_result.table ? filter_result.table : export_table;
-    newtable = table;
+    
+    /* Get list of tables to operate on */
+    if(operation == ROUTE_FLUSH) {
+        /* For flush, use the tables the route is currently installed in */
+        if(route->installed_table_count > 0) {
+            memcpy(tables_to_use, route->installed_tables, 
+                   route->installed_table_count * sizeof(int));
+            num_tables = route->installed_table_count;
+        }
+    } else {
+        /* For ADD/MODIFY, evaluate filter result */
+        if(filter_result.table_count > 0) {
+            memcpy(tables_to_use, filter_result.tables, 
+                   filter_result.table_count * sizeof(unsigned int));
+            num_tables = filter_result.table_count;
+        } else if(export_table > 0) {
+            tables_to_use[0] = export_table;
+            num_tables = 1;
+        }
+    }
 
     if(newsrc) {
         m = install_filter(newsrc->id,
                            newsrc->prefix, newsrc->plen,
                            newsrc->src_prefix, newsrc->src_plen,
-                           new_ifindex, &filter_result);
-        newpref_src = filter_result.pref_src ? filter_result.pref_src : pref_src;
-        newtable = filter_result.table ? filter_result.table : export_table;
+                           new_ifindex, &new_filter_result);
+        newpref_src = new_filter_result.pref_src ? new_filter_result.pref_src : pref_src;
     }
 
-    rc = kernel_route(operation, table, route->src->prefix, route->src->plen,
-                        route->src->src_prefix, route->src->src_plen, pref_src,
-                        route->nexthop, ifindex,
-                        metric, new_next_hop, new_ifindex, new_metric,
-                        operation == ROUTE_MODIFY ? newtable : 0,
-                        newpref_src);
+    /* Install, modify, or flush route in each table */
+    if(installed_tables && installed_table_count) {
+        *installed_table_count = 0;
+    }
 
-    if (rc >= 0 && installed_table) {
-        if (operation == ROUTE_ADD || operation == ROUTE_MODIFY) {
-            *installed_table = newtable;
-        } else {
-            *installed_table = -1;
+    for(i = 0; i < num_tables; i++) {
+        int table = tables_to_use[i];
+        int newtable = table;
+        
+        if(newsrc && new_filter_result.table_count > 0) {
+            /* Use corresponding table from new filter result if available */
+            newtable = i < new_filter_result.table_count ? 
+                       new_filter_result.tables[i] : new_filter_result.tables[0];
+        } else if(newsrc) {
+            newtable = table;
+        }
+
+        rc = kernel_route(operation, table, route->src->prefix, route->src->plen,
+                            route->src->src_prefix, route->src->src_plen, pref_src,
+                            route->nexthop, ifindex,
+                            metric, new_next_hop, new_ifindex, new_metric,
+                            operation == ROUTE_MODIFY ? newtable : 0,
+                            newpref_src);
+
+        if(rc < 0) {
+            /* Continue to attempt other tables, but save first error */
+            if(first_rc == 0)
+                first_rc = rc;
+        } else if(installed_tables && installed_table_count) {
+            /* Store successfully installed table */
+            if(*installed_table_count < MAX_TABLES_PER_FILTER) {
+                installed_tables[(*installed_table_count)++] = newtable;
+            }
         }
     }
 
-    return rc;
+    return first_rc == 0 ? (num_tables > 0 ? 0 : -1) : first_rc;
 }
 
 void
@@ -572,7 +612,7 @@ install_route(struct babel_route *route)
            format_prefix(route->src->prefix, route->src->plen),
            format_prefix(route->src->src_prefix, route->src->src_plen));
     rc = change_route(ROUTE_ADD, route, metric_to_kernel(route_metric(route)),
-                      NULL, 0, 0, NULL, &route->installed_table);
+                      NULL, 0, 0, NULL, route->installed_tables, &route->installed_table_count);
     if(rc < 0 && errno != EEXIST) {
         perror("kernel_route(ADD)");
         return;
@@ -598,12 +638,13 @@ uninstall_route(struct babel_route *route)
            format_prefix(route->src->prefix, route->src->plen),
            format_prefix(route->src->src_prefix, route->src->src_plen));
     rc = change_route(ROUTE_FLUSH, route, metric_to_kernel(route_metric(route)),
-                      NULL, 0, 0, NULL, &route->installed_table);
+                      NULL, 0, 0, NULL, NULL, NULL);
     if(rc < 0) {
         perror("kernel_route(FLUSH)");
         return;
     }
 
+    route->installed_table_count = 0;
     local_notify_route(route, LOCAL_CHANGE);
 }
 
@@ -633,14 +674,14 @@ switch_routes(struct babel_route *old, struct babel_route *new)
     rc = change_route(ROUTE_MODIFY, old, metric_to_kernel(route_metric(old)),
                       new->nexthop, new->neigh->ifp->ifindex,
                       metric_to_kernel(route_metric(new)),
-                      new->src, &new->installed_table);
+                      new->src, new->installed_tables, &new->installed_table_count);
     if(rc < 0) {
         perror("kernel_route(MODIFY)");
         return;
     }
 
     old->installed = 0;
-    old->installed_table = -1;
+    old->installed_table_count = 0;
     new->installed = 1;
     move_installed_route(new, find_route_slot(new->src->id,
                                               new->src->prefix, new->src->plen,
@@ -665,7 +706,7 @@ change_route_metric(struct babel_route *route,
                format_prefix(route->src->src_prefix, route->src->src_plen),
                old_metric, new_metric);
         rc = change_route(ROUTE_MODIFY, route, old_metric, route->nexthop,
-                          route->neigh->ifp->ifindex, new_metric, NULL, NULL);
+                          route->neigh->ifp->ifindex, new_metric, NULL, NULL, NULL);
         if(rc < 0) {
             perror("kernel_route(MODIFY metric)");
             return;

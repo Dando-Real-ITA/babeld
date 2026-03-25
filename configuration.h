@@ -39,11 +39,14 @@ THE SOFTWARE.
 #define FILTER_TYPE_REDISTRIBUTE 2
 #define FILTER_TYPE_INSTALL 3
 
+#define MAX_TABLES_PER_FILTER 32
+
 struct filter_result {
     unsigned int add_metric; /* allow = 0, deny = INF, metric = <0..INF> */
     unsigned char *src_prefix;
     unsigned char src_plen;
-    unsigned int table;
+    unsigned int tables[MAX_TABLES_PER_FILTER];
+    int table_count;
     unsigned char *pref_src;
 };
 

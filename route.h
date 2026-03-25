@@ -20,6 +20,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+#ifndef MAX_TABLES_PER_FILTER
+#define MAX_TABLES_PER_FILTER 32
+#endif
+
 struct babel_route {
     struct source *src;
     unsigned short refmetric;
@@ -33,7 +37,8 @@ struct babel_route {
     unsigned short smoothed_metric; /* for route selection */
     time_t smoothed_metric_time;
     short installed;
-    int installed_table;
+    int installed_tables[MAX_TABLES_PER_FILTER];  /* Array of kernel routing tables */
+    int installed_table_count;                     /* Number of tables route is installed in */
     struct babel_route *next;
 };
 
