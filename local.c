@@ -233,21 +233,34 @@ local_notify_xroute(struct xroute *xroute, int kind)
 static void
 local_notify_route_1(struct local_socket *s, struct babel_route *route, int kind)
 {
-    char buf[512];
-    int rc;
+    char buf[512], tables_buf[384];
+    int rc, i;
     const char *dst_prefix = format_prefix(route->src->prefix,
                                            route->src->plen);
     const char *src_prefix = format_prefix(route->src->src_prefix,
                                            route->src->src_plen);
 
+    /* Build tables string from array */
+    tables_buf[0] = '\0';
+    if(route->installed_table_count > 0) {
+        int written = 0;
+        for(i = 0; i < route->installed_table_count && written < 370; i++) {
+            int len = snprintf(tables_buf + written, 384 - written, 
+                             "%s%u", i > 0 ? "," : "", 
+                             route->installed_tables[i]);
+            if(len > 0)
+                written += len;
+        }
+    }
+
     rc = snprintf(buf, 512,
-                  "%s route %lx prefix %s from %s installed %s table %d "
+                  "%s route %lx prefix %s from %s installed %s tables %s "
                   "id %s metric %d refmetric %d via %s if %s\n",
                   local_kind(kind),
                   (unsigned long)route,
                   dst_prefix, src_prefix,
                   route->installed ? "yes" : "no",
-                  route->installed_table,
+                  tables_buf,
                   format_eui64(route->src->id),
                   route_metric(route), route->refmetric,
                   format_address(route->neigh->address),
