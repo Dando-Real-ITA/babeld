@@ -380,6 +380,7 @@ parse_filter(int c, gnc_t gnc, void *closure, struct filter **filter_return)
         return -2;
     filter->plen_le = 128;
     filter->src_plen_le = 128;
+    filter->action.table_count = 0;
 
     while(1) {
         c = skip_whitespace(c, gnc, closure);
@@ -505,7 +506,11 @@ parse_filter(int c, gnc_t gnc, void *closure, struct filter **filter_return)
             if(c < -1) goto error;
             if(table <= 0 || table > 0xFFFFFFFF)
                 goto error;
-            filter->action.table = table;
+            /* Support multiple table keywords */
+            if(filter->action.table_count >= MAX_TABLES_PER_FILTER) {
+                goto error;  /* Too many tables specified */
+            }
+            filter->action.tables[filter->action.table_count++] = table;
         } else if(strcmp(token, "pref-src") == 0) {
             int af;
             c = getip(c, &filter->action.pref_src, &af, gnc, closure);
@@ -1485,7 +1490,10 @@ update_filter(struct filter *f, struct filter *newf)
         if(filter_match(f, newf->id, newf->prefix, newf->plen, newf->src_prefix, newf->src_plen,
                         newf->neigh, newf->ifindex, newf->proto)) {
             f->action.add_metric = newf->action.add_metric;
-            f->action.table = newf->action.table;
+            /* Copy table array from newf to f */
+            f->action.table_count = newf->action.table_count;
+            memcpy(f->action.tables, newf->action.tables, 
+                   newf->action.table_count * sizeof(unsigned int));
             // memcpy(f->action.pref_src, newf->action.pref_src, 16);
             return -1;
         }
