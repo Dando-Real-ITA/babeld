@@ -367,6 +367,16 @@ modify_xroute(int i, struct kernel_route *kroute, int update) {
                         xroutes[i].src_prefix, xroutes[i].src_plen);
     }
 }
+static int
+route_installed_in_table(const struct babel_route *route, int table)
+{
+    int i;
+    for(i = 0; i < route->installed_table_count; i++) {
+        if(route->installed_tables[i] == table)
+            return 1;
+    }
+    return 0;
+}
 
 static void
 flush_duplicate_route(struct kernel_route *kroute) {
@@ -375,7 +385,7 @@ flush_duplicate_route(struct kernel_route *kroute) {
     do {
         route = find_installed_route(NULL, kroute->prefix, kroute->plen,
                                     kroute->src_prefix, kroute->src_plen, &duplicate_i);
-    } while (route && has_duplicate_default && is_default(kroute->prefix, kroute->plen) && route->installed_table != kroute->table);
+    } while (route && has_duplicate_default && is_default(kroute->prefix, kroute->plen) && !route_installed_in_table(route, kroute->table));
     if(route) {
         if(allow_duplicates < 0 || kroute->metric < allow_duplicates)
             uninstall_route(route);
