@@ -29,7 +29,7 @@ kernel.o: kernel_netlink.c kernel_socket.c
 .FORCE:
 
 version.h: .FORCE
-	./generate-version.sh > version.h
+	./generate-version.sh
 
 .SUFFIXES: .man .html
 
