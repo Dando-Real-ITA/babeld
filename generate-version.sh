@@ -10,4 +10,8 @@ else
     version="unknown"
 fi
 
-echo "#define BABELD_VERSION \"$version\""
+NEW_CONTENT="#define BABELD_VERSION \"$version\""
+
+if [ ! -f version.h ] || [ "$(cat version.h)" != "$NEW_CONTENT" ]; then
+    echo "$NEW_CONTENT" > version.h
+fi
