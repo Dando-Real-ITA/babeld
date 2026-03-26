@@ -95,8 +95,7 @@ route_compare(const unsigned char *id,
     if(has_duplicate_default &&
        is_default(prefix, plen) &&
        is_default(route->src->prefix, route->src->plen) &&
-       id &&
-       route->src->id) {
+       id) {
         i = memcmp(id, route->src->id, 8);
         if(i != 0)
             return i;
