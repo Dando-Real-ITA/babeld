@@ -406,6 +406,8 @@ flush_duplicate_route(struct kernel_route *kroute) {
                                     kroute->src_prefix, kroute->src_plen, &duplicate_i);
     } while (route && has_duplicate_default && is_default(kroute->prefix, kroute->plen) && !route_installed_in_table(route, kroute->table));
     if(route) {
+        debugf("Found duplicate route to %s (src_plen=%d) in table %d\n",
+               format_prefix(kroute->prefix, kroute->plen), kroute->src_plen, kroute->table);
         if(allow_duplicates < 0 || kroute->metric < allow_duplicates)
             uninstall_route(route);
     }
@@ -534,6 +536,12 @@ check_xroutes(int send_updates, int warn, int check_infinity)
                 continue;
             }
 
+            /* Skip martian prefixes before comparing */
+            if(i < numroutes && martian_prefix(routes[i].prefix, routes[i].plen)) {
+                i++;
+                continue;
+            }
+
             if(i >= numroutes)
                 rc = +1;
             else if(j >= numxroutes)
@@ -544,8 +552,7 @@ check_xroutes(int send_updates, int warn, int check_infinity)
                                     &xroutes[j]);
             if(rc < 0) {
                 /* Add route i. */
-                if(!martian_prefix(routes[i].prefix, routes[i].plen) &&
-                   routes[i].metric < INFINITY) {
+                if(routes[i].metric < INFINITY) {
                     if(warn)
                         fprintf(stderr,
                                 "Adding missing route to %s "
