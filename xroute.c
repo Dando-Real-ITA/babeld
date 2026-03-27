@@ -162,8 +162,8 @@ flush_xroute(struct xroute *xroute, int send_updates)
 
     /* We'll use these after we free the xroute */
     memcpy(prefix, xroute->prefix, 16);
-    plen = xroutes->plen;
-    memcpy(src_prefix, xroutes->src_prefix, 16);
+    plen = xroute->plen;
+    memcpy(src_prefix, xroute->src_prefix, 16);
     src_plen = xroute->src_plen;
 
     i = xroute - xroutes;
