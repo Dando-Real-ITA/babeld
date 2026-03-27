@@ -48,6 +48,10 @@ xroute_compare(const unsigned char *prefix, unsigned char plen,
                const unsigned char *src_prefix, unsigned char src_plen,
                const struct xroute *xroute)
 {
+
+    debugf("Comparing route %s (src_plen=%d) with xroute %s (src_plen=%d)\n",
+            format_prefix(prefix, plen), src_plen,
+            format_prefix(xroute->prefix, xroute->plen), xroute->src_plen);
     int rc;
 
     if(plen < xroute->plen)
@@ -494,6 +498,9 @@ check_xroutes(int send_updates, int warn, int check_infinity)
             memcpy(routes[i].src_prefix, filter_result.src_prefix, 16);
             routes[i].src_plen = filter_result.src_plen;
         }
+        debugf("Route after filter: %s src_plen=%d\n",
+                format_prefix(routes[i].prefix, routes[i].plen),
+                routes[i].src_plen);
         debugf("Route %s metric %d\n",
                 format_prefix(routes[i].prefix, routes[i].plen), routes[i].metric);
     }
@@ -534,11 +541,9 @@ check_xroutes(int send_updates, int warn, int check_infinity)
                     if(send_updates)
                         send_update(NULL, 0, routes[i].prefix, routes[i].plen,
                                     routes[i].src_prefix, routes[i].src_plen);
-                    j++;
-                } else if(rc == -1) {
-                    /* Route already exists in xroutes; they match, move past both */
-                    i++;
-                    j++;
+                    /* Restart from beginning to ensure sync after modification */
+                    i = 0;
+                    j = 0;
                     continue;
                 }
             }
@@ -551,6 +556,10 @@ check_xroutes(int send_updates, int warn, int check_infinity)
                         "(this shouldn't happen)\n",
                         format_prefix(xroutes[j].prefix, xroutes[j].plen));
             flush_xroute(&xroutes[j], send_updates);
+            /* Restart from beginning to ensure sync after modification */
+            i = 0;
+            j = 0;
+            continue;
         } else {
             modify_xroute(j, &routes[i], send_updates);
             i++;
