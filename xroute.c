@@ -525,6 +525,37 @@ check_xroutes(int send_updates, int warn, int check_infinity)
 
     qsort(routes, numroutes, sizeof(struct kernel_route), kernel_route_compare);
     
+    /* Filter out invalid and duplicate routes before merge */
+    int filtered_count = 0;
+    for(i = 0; i < numroutes; i++) {
+        /* Skip routes with INFINITY metric */
+        if(!check_infinity && routes[i].metric >= INFINITY)
+            continue;
+        
+        /* Skip martian prefixes */
+        if(martian_prefix(routes[i].prefix, routes[i].plen))
+            continue;
+        
+        /* Skip duplicates - check against all previously filtered routes */
+        int is_duplicate = 0;
+        for(int k = 0; k < filtered_count; k++) {
+            if(kernel_route_compare(&routes[k], &routes[i]) == 0) {
+                is_duplicate = 1;
+                break;
+            }
+        }
+        if(is_duplicate)
+            continue;
+        
+        /* Keep this route */
+        if(filtered_count != i)
+            routes[filtered_count] = routes[i];
+        filtered_count++;
+    }
+    numroutes = filtered_count;
+    
+    debugf("After filtering: %d valid routes\n", numroutes);
+    
     /* Keep iterating until arrays are synchronized (no changes made) */
     int made_changes = 1;
     while(made_changes) {
@@ -533,18 +564,6 @@ check_xroutes(int send_updates, int warn, int check_infinity)
         j = 0;
         
         while(i < numroutes || j < numxroutes) {
-            /* Ignore routes filtered out. */
-            if(!check_infinity && i < numroutes && routes[i].metric >= INFINITY) {
-                i++;
-                continue;
-            }
-
-            /* Skip martian prefixes before comparing */
-            if(i < numroutes && martian_prefix(routes[i].prefix, routes[i].plen)) {
-                i++;
-                continue;
-            }
-
             debugf("Index i=%d, j=%d, numroutes=%d, numxroutes=%d\n", i, j, numroutes, numxroutes);
             if(i >= numroutes)
                 rc = +1;
@@ -556,29 +575,27 @@ check_xroutes(int send_updates, int warn, int check_infinity)
                                     &xroutes[j]);
             if(rc < 0) {
                 /* Add route i. */
-                if(routes[i].metric < INFINITY) {
-                    if(warn)
-                        fprintf(stderr,
-                                "Adding missing route to %s "
-                                "(this shouldn't happen)\n",
-                                format_prefix(routes[i].prefix, routes[i].plen));
-                    rc = add_xroute(routes[i].prefix, routes[i].plen,
-                                    routes[i].src_prefix, routes[i].src_plen,
-                                    routes[i].metric, routes[i].ifindex,
-                                    routes[i].proto);
-                    if(rc > 0) {
-                        flush_duplicate_route(&routes[i]);
-                        if(send_updates)
-                            send_update(NULL, 0, routes[i].prefix, routes[i].plen,
-                                        routes[i].src_prefix, routes[i].src_plen);
-                        made_changes = 1;
-                        break;  /* Restart the pass */
-                    } else if(rc == -1) {
-                        /* Route already exists; it must match xroutes[j], increment both */
-                        i++;
-                        j++;
-                        continue;
-                    }
+                if(warn)
+                    fprintf(stderr,
+                            "Adding missing route to %s "
+                            "(this shouldn't happen)\n",
+                            format_prefix(routes[i].prefix, routes[i].plen));
+                rc = add_xroute(routes[i].prefix, routes[i].plen,
+                                routes[i].src_prefix, routes[i].src_plen,
+                                routes[i].metric, routes[i].ifindex,
+                                routes[i].proto);
+                if(rc > 0) {
+                    flush_duplicate_route(&routes[i]);
+                    if(send_updates)
+                        send_update(NULL, 0, routes[i].prefix, routes[i].plen,
+                                    routes[i].src_prefix, routes[i].src_plen);
+                    made_changes = 1;
+                    break;  /* Restart the pass */
+                } else if(rc == -1) {
+                    /* Route already exists; it must match xroutes[j], increment both */
+                    i++;
+                    j++;
+                    continue;
                 }
                 i++;
             } else if(rc > 0) {
