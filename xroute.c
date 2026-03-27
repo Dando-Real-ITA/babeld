@@ -138,7 +138,10 @@ add_xroute(unsigned char prefix[16], unsigned char plen,
            unsigned short metric, unsigned int ifindex, int proto)
 {
     int n = -1;
+    debugf("Adding xroute %s (src_plen=%d)\n",
+           format_prefix(prefix, plen), src_plen);
     int i = find_xroute_slot(prefix, plen, src_prefix, src_plen, &n);
+    debugf("  -> find_xroute_slot returned i=%d, n=%d\n", i, n);
 
     if(i >= 0)
         return -1;
@@ -542,6 +545,7 @@ check_xroutes(int send_updates, int warn, int check_infinity)
                 continue;
             }
 
+            debugf("Index i=%d, j=%d, numroutes=%d, numxroutes=%d\n", i, j, numroutes, numxroutes);
             if(i >= numroutes)
                 rc = +1;
             else if(j >= numxroutes)
