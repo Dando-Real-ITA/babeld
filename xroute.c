@@ -397,6 +397,8 @@ route_installed_in_table(const struct babel_route *route, int table)
 
 static void
 flush_duplicate_route(struct kernel_route *kroute) {
+    debugf("Checking for duplicate routes to %s (src_plen=%d) in table %d\n",
+           format_prefix(kroute->prefix, kroute->plen), kroute->src_plen, kroute->table);
     struct babel_route *route;
     int duplicate_i = -1;
     do {
@@ -560,6 +562,11 @@ check_xroutes(int send_updates, int warn, int check_infinity)
                                         routes[i].src_prefix, routes[i].src_plen);
                         made_changes = 1;
                         break;  /* Restart the pass */
+                    } else if(rc == -1) {
+                        /* Route already exists; it must match xroutes[j], increment both */
+                        i++;
+                        j++;
+                        continue;
                     }
                 }
                 i++;
