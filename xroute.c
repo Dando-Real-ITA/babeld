@@ -511,72 +511,73 @@ check_xroutes(int send_updates, int warn, int check_infinity)
             memcpy(routes[i].src_prefix, filter_result.src_prefix, 16);
             routes[i].src_plen = filter_result.src_plen;
         }
-        debugf("Route after filter: %s src_plen=%d\n",
+        debugf("Route after filter: %s src_plen=%d metric %d\n",
                 format_prefix(routes[i].prefix, routes[i].plen),
-                routes[i].src_plen);
-        debugf("Route %s metric %d\n",
-                format_prefix(routes[i].prefix, routes[i].plen), routes[i].metric);
+                routes[i].src_plen, routes[i].metric);
     }
 
     qsort(routes, numroutes, sizeof(struct kernel_route), kernel_route_compare);
-    i = 0;
-    j = 0;
-    while(i < numroutes || j < numxroutes) {
-        /* Ignore routes filtered out. */
-        if(!check_infinity && i < numroutes && routes[i].metric >= INFINITY) {
-            i++;
-            continue;
-        }
+    
+    /* Keep iterating until arrays are synchronized (no changes made) */
+    int made_changes = 1;
+    while(made_changes) {
+        made_changes = 0;
+        i = 0;
+        j = 0;
+        
+        while(i < numroutes || j < numxroutes) {
+            /* Ignore routes filtered out. */
+            if(!check_infinity && i < numroutes && routes[i].metric >= INFINITY) {
+                i++;
+                continue;
+            }
 
-        if(i >= numroutes)
-            rc = +1;
-        else if(j >= numxroutes)
-            rc = -1;
-        else
-            rc = xroute_compare(routes[i].prefix, routes[i].plen,
-                                routes[i].src_prefix, routes[i].src_plen,
-                                &xroutes[j]);
-        if(rc < 0) {
-            /* Add route i. */
-            if(!martian_prefix(routes[i].prefix, routes[i].plen) &&
-               routes[i].metric < INFINITY) {
+            if(i >= numroutes)
+                rc = +1;
+            else if(j >= numxroutes)
+                rc = -1;
+            else
+                rc = xroute_compare(routes[i].prefix, routes[i].plen,
+                                    routes[i].src_prefix, routes[i].src_plen,
+                                    &xroutes[j]);
+            if(rc < 0) {
+                /* Add route i. */
+                if(!martian_prefix(routes[i].prefix, routes[i].plen) &&
+                   routes[i].metric < INFINITY) {
+                    if(warn)
+                        fprintf(stderr,
+                                "Adding missing route to %s "
+                                "(this shouldn't happen)\n",
+                                format_prefix(routes[i].prefix, routes[i].plen));
+                    rc = add_xroute(routes[i].prefix, routes[i].plen,
+                                    routes[i].src_prefix, routes[i].src_plen,
+                                    routes[i].metric, routes[i].ifindex,
+                                    routes[i].proto);
+                    if(rc > 0) {
+                        flush_duplicate_route(&routes[i]);
+                        if(send_updates)
+                            send_update(NULL, 0, routes[i].prefix, routes[i].plen,
+                                        routes[i].src_prefix, routes[i].src_plen);
+                        made_changes = 1;
+                        break;  /* Restart the pass */
+                    }
+                }
+                i++;
+            } else if(rc > 0) {
+                /* Flush xroute j. */
                 if(warn)
                     fprintf(stderr,
-                            "Adding missing route to %s "
+                            "Flushing spurious route to %s "
                             "(this shouldn't happen)\n",
-                            format_prefix(routes[i].prefix, routes[i].plen));
-                rc = add_xroute(routes[i].prefix, routes[i].plen,
-                                routes[i].src_prefix, routes[i].src_plen,
-                                routes[i].metric, routes[i].ifindex,
-                                routes[i].proto);
-                if(rc > 0) {
-                    flush_duplicate_route(&routes[i]);
-                    if(send_updates)
-                        send_update(NULL, 0, routes[i].prefix, routes[i].plen,
-                                    routes[i].src_prefix, routes[i].src_plen);
-                    /* Restart from beginning to ensure sync after modification */
-                    i = 0;
-                    j = 0;
-                    continue;
-                }
+                            format_prefix(xroutes[j].prefix, xroutes[j].plen));
+                flush_xroute(&xroutes[j], send_updates);
+                made_changes = 1;
+                break;  /* Restart the pass */
+            } else {
+                modify_xroute(j, &routes[i], send_updates);
+                i++;
+                j++;
             }
-            i++;
-        } else if(rc > 0) {
-            /* Flush xroute j. */
-            if(warn)
-                fprintf(stderr,
-                        "Flushing spurious route to %s "
-                        "(this shouldn't happen)\n",
-                        format_prefix(xroutes[j].prefix, xroutes[j].plen));
-            flush_xroute(&xroutes[j], send_updates);
-            /* Restart from beginning to ensure sync after modification */
-            i = 0;
-            j = 0;
-            continue;
-        } else {
-            modify_xroute(j, &routes[i], send_updates);
-            i++;
-            j++;
         }
     }
 
