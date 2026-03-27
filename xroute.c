@@ -535,6 +535,11 @@ check_xroutes(int send_updates, int warn, int check_infinity)
                         send_update(NULL, 0, routes[i].prefix, routes[i].plen,
                                     routes[i].src_prefix, routes[i].src_plen);
                     j++;
+                } else if(rc == -1) {
+                    /* Route already exists in xroutes; they match, move past both */
+                    i++;
+                    j++;
+                    continue;
                 }
             }
             i++;
