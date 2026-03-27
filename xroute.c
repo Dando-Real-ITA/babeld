@@ -54,24 +54,37 @@ xroute_compare(const unsigned char *prefix, unsigned char plen,
             format_prefix(xroute->prefix, xroute->plen), xroute->src_plen);
     int rc;
 
-    if(plen < xroute->plen)
+    if(plen < xroute->plen) {
+        debugf("  -> plen comparison: %d < %d = -1\n", plen, xroute->plen);
         return -1;
-    if(plen > xroute->plen)
+    }
+    if(plen > xroute->plen) {
+        debugf("  -> plen comparison: %d > %d = +1\n", plen, xroute->plen);
         return 1;
+    }
 
     rc = memcmp(prefix, xroute->prefix, 16);
-    if(rc != 0)
+    if(rc != 0) {
+        debugf("  -> prefix memcmp = %d\n", rc);
         return rc;
+    }
 
-    if(src_plen < xroute->src_plen)
+    if(src_plen < xroute->src_plen) {
+        debugf("  -> src_plen comparison: %d < %d = -1\n", src_plen, xroute->src_plen);
         return -1;
-    if(src_plen > xroute->src_plen)
+    }
+    if(src_plen > xroute->src_plen) {
+        debugf("  -> src_plen comparison: %d > %d = +1\n", src_plen, xroute->src_plen);
         return 1;
+    }
 
     rc = memcmp(src_prefix, xroute->src_prefix, 16);
-    if(rc != 0)
+    if(rc != 0) {
+        debugf("  -> src_prefix memcmp = %d\n", rc);
         return rc;
+    }
 
+    debugf("  -> MATCH (rc=0)\n");
     return 0;
 }
 
