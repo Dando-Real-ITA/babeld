@@ -64,7 +64,23 @@ static int config_finalised = 0;
 /* get_next_char callback */
 typedef int (*gnc_t)(void*);
 
+/* Include stack entry for circular include detection */
+struct include_stack_entry {
+    char *filename;
+    struct include_stack_entry *next;
+};
+
+static struct include_stack_entry *include_stack = NULL;
+static char *current_file_dir = NULL;  /* Track current config file's directory */
+
 static int update_filter(struct filter *f, struct filter *newf);
+
+/* Forward declarations for include support */
+static char *get_file_directory(const char *filename);
+static char *resolve_relative_path(const char *base_dir, const char *relative_path);
+static int is_file_included(const char *filename);
+static int push_include_file(const char *filename);
+static void pop_include_file(void);
 
 static int
 skip_whitespace(int c, gnc_t gnc, void *closure)
@@ -1279,6 +1295,38 @@ parse_config_line(int c, gnc_t gnc, void *closure,
         if(c < -1 || !action_return)
             goto fail;
         *action_return = CONFIG_ACTION_CHECK_XROUTES;
+    } else if(strcmp(token, "include") == 0) {
+        char *include_file = NULL;
+        char *resolved_path = NULL;
+        int include_line = 0;
+        int rc;
+
+        if(config_finalised)
+            goto fail;
+
+        c = getstring(c, &include_file, gnc, closure);
+        if(c < -1 || include_file == NULL)
+            goto fail;
+
+        c = skip_eol(c, gnc, closure);
+        if(c < -2) {
+            free(include_file);
+            goto fail;
+        }
+
+        /* Resolve the include path relative to current file's directory */
+        resolved_path = resolve_relative_path(current_file_dir, include_file);
+        if(resolved_path == NULL) {
+            free(include_file);
+            goto fail;
+        }
+
+        rc = parse_config_from_file(resolved_path, &include_line);
+        free(include_file);
+        free(resolved_path);
+
+        if(rc < 0)
+            goto fail;
     } else {
         c = parse_option(c, gnc, closure, token);
         if(c < -1)
@@ -1296,6 +1344,7 @@ parse_config_line(int c, gnc_t gnc, void *closure,
 struct file_state {
     FILE *f;
     int line;
+    char *directory;  /* Directory of the current config file */
 };
 
 static int
@@ -1308,21 +1357,158 @@ gnc_file(struct file_state *s)
     return c;
 }
 
+/* Extract directory path from a filename */
+static char *
+get_file_directory(const char *filename)
+{
+    const char *last_slash;
+    char *dir;
+    size_t len;
+
+    if(filename == NULL)
+        return NULL;
+
+    last_slash = strrchr(filename, '/');
+    if(last_slash == NULL) {
+        /* No directory component, use current directory */
+        dir = malloc(2);
+        if(dir != NULL)
+            strcpy(dir, ".");
+        return dir;
+    }
+
+    len = last_slash - filename;
+    dir = malloc(len + 1);
+    if(dir != NULL) {
+        memcpy(dir, filename, len);
+        dir[len] = '\0';
+    }
+    return dir;
+}
+
+/* Resolve a path relative to a base directory */
+static char *
+resolve_relative_path(const char *base_dir, const char *relative_path)
+{
+    char *result;
+    size_t base_len, path_len, total_len;
+
+    if(relative_path == NULL)
+        return NULL;
+
+    /* If path is absolute, use it as-is */
+    if(relative_path[0] == '/')
+        return strdup(relative_path);
+
+    if(base_dir == NULL)
+        return strdup(relative_path);
+
+    base_len = strlen(base_dir);
+    path_len = strlen(relative_path);
+    total_len = base_len + 1 + path_len;
+
+    result = malloc(total_len + 1);
+    if(result == NULL)
+        return NULL;
+
+    memcpy(result, base_dir, base_len);
+    result[base_len] = '/';
+    memcpy(result + base_len + 1, relative_path, path_len);
+    result[total_len] = '\0';
+
+    return result;
+}
+
+/* Check if a file is already being processed (circular include detection) */
+static int
+is_file_included(const char *filename)
+{
+    struct include_stack_entry *entry;
+    entry = include_stack;
+    while(entry != NULL) {
+        if(strcmp(entry->filename, filename) == 0)
+            return 1;
+        entry = entry->next;
+    }
+    return 0;
+}
+
+/* Push a file onto the include stack */
+static int
+push_include_file(const char *filename)
+{
+    struct include_stack_entry *entry;
+
+    if(is_file_included(filename))
+        return -1;  /* Circular include detected */
+
+    entry = malloc(sizeof(struct include_stack_entry));
+    if(entry == NULL)
+        return -1;
+
+    entry->filename = strdup(filename);
+    if(entry->filename == NULL) {
+        free(entry);
+        return -1;
+    }
+
+    entry->next = include_stack;
+    include_stack = entry;
+    return 0;
+}
+
+/* Pop a file from the include stack */
+static void
+pop_include_file(void)
+{
+    struct include_stack_entry *entry;
+    if(include_stack == NULL)
+        return;
+
+    entry = include_stack;
+    include_stack = entry->next;
+    free(entry->filename);
+    free(entry);
+}
+
 int
 parse_config_from_file(const char *filename, int *line_return)
 {
-    struct file_state s = { NULL, 1 };
+    struct file_state s = { NULL, 1, NULL };
     int c;
+    int result = 1;
+    char *old_file_dir;
 
-    s.f = fopen(filename, "r");
-    if(s.f == NULL) {
+    if(push_include_file(filename) < 0) {
+        fprintf(stderr, "Circular include detected: %s\n", filename);
         *line_return = 0;
         return -1;
     }
 
+    s.f = fopen(filename, "r");
+    if(s.f == NULL) {
+        pop_include_file();
+        *line_return = 0;
+        return -1;
+    }
+
+    s.directory = get_file_directory(filename);
+    if(s.directory == NULL) {
+        fclose(s.f);
+        pop_include_file();
+        return -1;
+    }
+
+    /* Save old directory and set new one */
+    old_file_dir = current_file_dir;
+    current_file_dir = s.directory;
+
     c = gnc_file(&s);
     if(c < 0) {
         fclose(s.f);
+        current_file_dir = old_file_dir;
+        free(s.directory);
+        pop_include_file();
         return 0;
     }
 
@@ -1330,15 +1516,18 @@ parse_config_from_file(const char *filename, int *line_return)
         c = parse_config_line(c, (gnc_t)gnc_file, &s, NULL, NULL);
         if(c < -1) {
             *line_return = s.line;
-            fclose(s.f);
-            return -1;
+            result = -1;
+            break;
         }
         if(c == -1)
             break;
     }
     fclose(s.f);
+    current_file_dir = old_file_dir;
+    free(s.directory);
+    pop_include_file();
 
-    return 1;
+    return result;
 }
 
 struct buf_state {

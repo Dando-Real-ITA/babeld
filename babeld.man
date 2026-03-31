@@ -142,6 +142,18 @@ a global option, an interface specification or a filtering
 rule.  Comments are introduced by an octothorp
 .RB `` # ''
 and terminate at the end of the line.
+.TP
+.BI include " filename"
+Include another configuration file. The filename can be an absolute path
+or a path relative to the directory containing the current configuration
+file.  For example, to include a file in the same directory, use
+.B include "interfaces.conf"
+or
+.B include "./interfaces.conf" .
+To include a file from the parent directory, use
+.B include "../common.conf" .
+Circular includes are detected and will cause an error. This directive
+is not allowed when the configuration is reloaded at runtime.
 .SS Global options
 .TP
 .BI protocol-group " group"
