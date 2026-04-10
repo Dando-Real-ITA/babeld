@@ -51,6 +51,18 @@ THE SOFTWARE.
 #define NETLINK_GET_STRICT_CHK 12
 #endif
 
+#ifndef NETLINK_EXT_ACK
+#define NETLINK_EXT_ACK 11
+#endif
+
+#ifndef NLM_F_ACK_TLVS
+#define NLM_F_ACK_TLVS 0x200
+#endif
+
+#ifndef NLMSGERR_ATTR_MSG
+#define NLMSGERR_ATTR_MSG 1
+#endif
+
 #if(__GLIBC__ < 2) || (__GLIBC__ == 2 && __GLIBC_MINOR__ <= 5)
 #define RTA_TABLE 15
 #endif
