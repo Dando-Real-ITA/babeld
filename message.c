@@ -745,10 +745,21 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                 if(rc < 0)
                     goto done;
                 changed = txcost != neigh->txcost;
+                int was_unreachable = (neigh->txcost >= INFINITY);
                 neigh->txcost = txcost;
                 neigh->ihu_time = now;
                 neigh->ihu_interval = interval;
                 update_neighbour_metric(neigh, changed);
+                /* In unicast mode the boot-time wildcard request was sent
+                   before any neighbours existed, so no unicast copy went out.
+                   When a neighbour first becomes reachable, ask it for a
+                   full route dump now. */
+                if(was_unreachable && txcost < INFINITY &&
+                   (ifp->flags & IF_UNICAST) != 0) {
+                    debugf("New unicast neighbour %s on %s, requesting full table.\n",
+                           format_address(from), ifp->name);
+                    send_unicast_request(neigh, NULL, 0, NULL, 0);
+                }
                 if(interval > 0)
                     /* Multiply by 3/2 to allow neighbours to expire. */
                     schedule_neighbours_check(interval * 45, 0);
