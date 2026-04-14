@@ -200,14 +200,19 @@ static int
 reset_txcost(struct neighbour *neigh)
 {
     unsigned delay;
+    int hello_lost;
 
     delay = timeval_minus_msec(&now, &neigh->ihu_time);
 
     if(neigh->ihu_interval > 0 && delay < neigh->ihu_interval * 10 * 3)
         return 0;
 
+    hello_lost = (neigh->hello.reach & 0xFFF0) == 0;
+    if((neigh->ifp->flags & IF_UNICAST) != 0)
+        hello_lost = hello_lost && ((neigh->uhello.reach & 0xFFF0) == 0);
+
     /* If we're losing a lot of packets, we probably lost an IHU too */
-    if(delay >= 180000 || (neigh->hello.reach & 0xFFF0) == 0 ||
+    if(delay >= 180000 || hello_lost ||
        (neigh->ihu_interval > 0 &&
         delay >= neigh->ihu_interval * 10 * 10)) {
         neigh->txcost = INFINITY;
@@ -235,13 +240,22 @@ check_neighbours()
     neigh = neighs;
     while(neigh) {
         int changed, rc;
+        int hello_expired, uhello_expired;
         changed = update_neighbour(neigh, &neigh->hello, 0, -1, 0);
         rc = update_neighbour(neigh, &neigh->uhello, 1, -1, 0);
         changed = changed || rc;
 
-        if(neigh->hello.reach == 0 ||
-           neigh->hello.time.tv_sec > now.tv_sec || /* clock stepped */
-           timeval_minus_msec(&now, &neigh->hello.time) > 300000) {
+        hello_expired =
+            neigh->hello.reach == 0 ||
+            neigh->hello.time.tv_sec > now.tv_sec || /* clock stepped */
+            timeval_minus_msec(&now, &neigh->hello.time) > 300000;
+        uhello_expired =
+            neigh->uhello.reach == 0 ||
+            neigh->uhello.time.tv_sec > now.tv_sec || /* clock stepped */
+            timeval_minus_msec(&now, &neigh->uhello.time) > 300000;
+
+        if(hello_expired &&
+           (((neigh->ifp->flags & IF_UNICAST) == 0) || uhello_expired)) {
             struct neighbour *old = neigh;
             neigh = neigh->next;
             flush_neighbour(old);
@@ -285,23 +299,36 @@ neighbour_rxcost(struct neighbour *neigh)
     unsigned delay, udelay;
     unsigned short reach = neigh->hello.reach;
     unsigned short ureach = neigh->uhello.reach;
+    unsigned short metric_reach;
+    unsigned metric_delay;
+    int reach_stale, ureach_stale;
 
     delay = timeval_minus_msec(&now, &neigh->hello.time);
     udelay = timeval_minus_msec(&now, &neigh->uhello.time);
 
-    if(((reach & 0xFFF0) == 0 || delay >= 180000) &&
-       ((ureach & 0xFFF0) == 0 || udelay >= 180000)) {
+    reach_stale = ((reach & 0xFFF0) == 0 || delay >= 180000);
+    ureach_stale = ((ureach & 0xFFF0) == 0 || udelay >= 180000);
+
+    if(reach_stale && ureach_stale) {
         return INFINITY;
     } else if((neigh->ifp->flags & IF_LQ)) {
+        if((neigh->ifp->flags & IF_UNICAST) != 0 && reach_stale && !ureach_stale) {
+            metric_reach = ureach;
+            metric_delay = udelay;
+        } else {
+            metric_reach = reach;
+            metric_delay = delay;
+        }
+
         int sreach =
-            ((reach & 0x8000) >> 2) +
-            ((reach & 0x4000) >> 1) +
-            (reach & 0x3FFF);
+            ((metric_reach & 0x8000) >> 2) +
+            ((metric_reach & 0x4000) >> 1) +
+            (metric_reach & 0x3FFF);
         /* 0 <= sreach <= 0x7FFF */
         int cost = (0x8000 * neigh->ifp->cost) / (sreach + 1);
         /* cost >= interface->cost */
-        if(delay >= 40000)
-            cost = (cost * (delay - 20000) + 10000) / 20000;
+        if(metric_delay >= 40000)
+            cost = (cost * (metric_delay - 20000) + 10000) / 20000;
         return MIN(cost, INFINITY);
     } else {
         if(two_three(reach) || two_three(ureach))
