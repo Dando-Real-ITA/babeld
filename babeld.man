@@ -401,8 +401,9 @@ for tunnel interfaces, and
 otherwise.
 .TP
 .BR unicast " {" true | false }
-Send multiple copies of TLVs other than Hellos to all neighbours rather
-than sending a single multicast packet.  The default is false.
+Send multiple unicast copies of protocol TLVs (including Hellos) to all
+neighbours rather than sending only a single multicast packet.  The
+default is false.
 .TP
 .BR rfc6126\-compatible " {" true | false }
 Disable some features that are incompatible with RFC 6126 (the older
