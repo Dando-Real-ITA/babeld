@@ -44,6 +44,12 @@ static struct xroute *xroutes;
 static int numxroutes = 0, maxxroutes = 0;
 
 static int
+normalise_table(int table)
+{
+    return table == 0 ? 254 : table;
+}
+
+static int
 xroute_prefix_compare(const unsigned char *prefix, unsigned char plen,
                      const unsigned char *src_prefix, unsigned char src_plen,
                      const struct xroute *xroute)
@@ -92,10 +98,11 @@ xroute_compare(const unsigned char *prefix, unsigned char plen,
                const struct xroute *xroute)
 {
     int rc;
+    int norm_table = normalise_table(table);
 
     debugf("Comparing route %s (src_plen=%d, table=%d) with "
            "xroute %s (src_plen=%d, table=%d)\n",
-           format_prefix(prefix, plen), src_plen, table,
+           format_prefix(prefix, plen), src_plen, norm_table,
            format_prefix(xroute->prefix, xroute->plen),
            xroute->src_plen, xroute->table);
 
@@ -105,12 +112,12 @@ xroute_compare(const unsigned char *prefix, unsigned char plen,
         return rc;
     }
 
-    if(table < xroute->table) {
-        debugf("  -> table comparison: %d < %d = -1\n", table, xroute->table);
+    if(norm_table < xroute->table) {
+        debugf("  -> table comparison: %d < %d = -1\n", norm_table, xroute->table);
         return -1;
     }
-    if(table > xroute->table) {
-        debugf("  -> table comparison: %d > %d = +1\n", table, xroute->table);
+    if(norm_table > xroute->table) {
+        debugf("  -> table comparison: %d > %d = +1\n", norm_table, xroute->table);
         return 1;
     }
 
@@ -206,9 +213,11 @@ add_xroute(unsigned char prefix[16], unsigned char plen,
            int proto, int table)
 {
     int n = -1;
+    int norm_table = normalise_table(table);
     debugf("Adding xroute %s (src_plen=%d, table=%d)\n",
-           format_prefix(prefix, plen), src_plen, table);
-    int i = find_xroute_slot(prefix, plen, src_prefix, src_plen, table, &n);
+        format_prefix(prefix, plen), src_plen, norm_table);
+    int i = find_xroute_slot(prefix, plen, src_prefix, src_plen,
+                 norm_table, &n);
     debugf("  -> find_xroute_slot returned i=%d, n=%d\n", i, n);
 
     if(i >= 0)
@@ -236,7 +245,7 @@ add_xroute(unsigned char prefix[16], unsigned char plen,
     xroutes[n].metric = metric;
     xroutes[n].ifindex = ifindex;
     xroutes[n].proto = proto;
-    xroutes[n].table = table;
+    xroutes[n].table = norm_table;
     local_notify_xroute(&xroutes[n], LOCAL_ADD);
     return 1;
 }
@@ -421,6 +430,7 @@ kernel_route_compare(const void *v1, const void *v2)
 {
     const struct kernel_route *route1 = (struct kernel_route*)v1;
     const struct kernel_route *route2 = (struct kernel_route*)v2;
+    int table1, table2;
     int rc;
 
     if(route1->plen < route2->plen)
@@ -441,9 +451,12 @@ kernel_route_compare(const void *v1, const void *v2)
     if(rc != 0)
         return rc;
 
-    if(route1->table < route2->table)
+    table1 = normalise_table(route1->table);
+    table2 = normalise_table(route2->table);
+
+    if(table1 < table2)
         return -1;
-    if(route1->table > route2->table)
+    if(table1 > table2)
         return 1;
 
     return 0;
@@ -497,11 +510,7 @@ kernel_route_notify(int add, struct kernel_route *kroute, void *closure)
     struct filter_result filter_result;
     int i, rc;
 
-    if(kroute->table == 0) {
-        debugf("Ignoring kernel route %s in alias table 0\n",
-               format_prefix(kroute->prefix, kroute->plen));
-        return;
-    }
+    kroute->table = normalise_table(kroute->table);
 
     debugf("Kernel route: %s %s (src_plen=%d, table=%d)",
            add ? "add" : "del", format_prefix(kroute->prefix, kroute->plen),
@@ -597,6 +606,7 @@ check_xroutes(int send_updates, int warn, int check_infinity)
         goto resize;
 
     for(i = 0; i < numroutes; i++) {
+        routes[i].table = normalise_table(routes[i].table);
         routes[i].metric = redistribute_filter(routes[i].prefix, routes[i].plen,
                                                routes[i].src_prefix,
                                                routes[i].src_plen,
@@ -617,9 +627,6 @@ check_xroutes(int send_updates, int warn, int check_infinity)
     /* Filter out invalid and duplicate routes before merge */
     int filtered_count = 0;
     for(i = 0; i < numroutes; i++) {
-        if(routes[i].table == 0)
-            continue;
-
         /* Skip routes with INFINITY metric */
         if(!check_infinity && routes[i].metric >= INFINITY)
             continue;
