@@ -37,6 +37,7 @@ THE SOFTWARE.
 #include "kernel.h"
 #include "xroute.h"
 #include "route.h"
+#include "message.h"
 #include "util.h"
 #include "configuration.h"
 #include "local.h"
@@ -291,12 +292,37 @@ local_notify_route(struct babel_route *route, int kind)
 }
 
 static void
+local_notify_status_1(struct local_socket *s, int kind)
+{
+    char buf[512];
+    int rc;
+
+    rc = snprintf(buf, sizeof(buf),
+                  "%s daemon version %s my-id %s my-seqno %u\n",
+                  local_kind(kind), BABELD_VERSION,
+                  format_eui64(myid), (unsigned int)myseqno);
+    if(rc < 0 || rc >= (int)sizeof(buf))
+        goto fail;
+
+    rc = write_timeout(s->fd, buf, rc);
+    if(rc < 0)
+        goto fail;
+    return;
+
+ fail:
+    shutdown(s->fd, 1);
+    return;
+}
+
+static void
 local_notify_all_1(struct local_socket *s)
 {
     struct interface *ifp;
     struct neighbour *neigh;
     struct xroute_stream *xroutes;
     struct route_stream *routes;
+
+    local_notify_status_1(s, LOCAL_ADD);
 
     FOR_ALL_INTERFACES(ifp) {
         local_notify_interface_1(s, ifp, LOCAL_ADD);
@@ -424,8 +450,10 @@ local_header(struct local_socket *s)
     if(rc < 0)
         strncpy(host, "alamakota", 64);
 
-    rc = snprintf(buf, 512, "BABEL 1.0\nversion %s\nhost %s\nmy-id %s\nok\n",
-                  BABELD_VERSION, host, format_eui64(myid));
+    rc = snprintf(buf, 512,
+                  "BABEL 1.0\nversion %s\nhost %s\nmy-id %s\nmy-seqno %u\nok\n",
+                  BABELD_VERSION, host, format_eui64(myid),
+                  (unsigned int)myseqno);
     if(rc < 0 || rc >= 512)
         goto fail;
     rc = write_timeout(s->fd, buf, rc);

@@ -1071,6 +1071,7 @@ dump_tables(FILE *out)
 
     fprintf(out, "\n");
 
+    fprintf(out, "Daemon version %s\n", BABELD_VERSION);
     fprintf(out, "My id %s seqno %d\n", format_eui64(myid), myseqno);
 
     FOR_ALL_NEIGHBOURS(neigh) {
