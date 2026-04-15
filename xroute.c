@@ -44,14 +44,10 @@ static struct xroute *xroutes;
 static int numxroutes = 0, maxxroutes = 0;
 
 static int
-xroute_compare(const unsigned char *prefix, unsigned char plen,
-               const unsigned char *src_prefix, unsigned char src_plen,
-               const struct xroute *xroute)
+xroute_prefix_compare(const unsigned char *prefix, unsigned char plen,
+                     const unsigned char *src_prefix, unsigned char src_plen,
+                     const struct xroute *xroute)
 {
-
-    debugf("Comparing route %s (src_plen=%d) with xroute %s (src_plen=%d)\n",
-            format_prefix(prefix, plen), src_plen,
-            format_prefix(xroute->prefix, xroute->plen), xroute->src_plen);
     int rc;
 
     if(plen < xroute->plen) {
@@ -84,6 +80,40 @@ xroute_compare(const unsigned char *prefix, unsigned char plen,
         return rc;
     }
 
+    debugf("  -> prefix/src MATCH (rc=0)\n");
+
+    return 0;
+}
+
+static int
+xroute_compare(const unsigned char *prefix, unsigned char plen,
+               const unsigned char *src_prefix, unsigned char src_plen,
+               int table,
+               const struct xroute *xroute)
+{
+    int rc;
+
+    debugf("Comparing route %s (src_plen=%d, table=%d) with "
+           "xroute %s (src_plen=%d, table=%d)\n",
+           format_prefix(prefix, plen), src_plen, table,
+           format_prefix(xroute->prefix, xroute->plen),
+           xroute->src_plen, xroute->table);
+
+    rc = xroute_prefix_compare(prefix, plen, src_prefix, src_plen, xroute);
+    if(rc != 0) {
+        debugf("  -> prefix/src comparison = %d\n", rc);
+        return rc;
+    }
+
+    if(table < xroute->table) {
+        debugf("  -> table comparison: %d < %d = -1\n", table, xroute->table);
+        return -1;
+    }
+    if(table > xroute->table) {
+        debugf("  -> table comparison: %d > %d = +1\n", table, xroute->table);
+        return 1;
+    }
+
     debugf("  -> MATCH (rc=0)\n");
     return 0;
 }
@@ -91,6 +121,7 @@ xroute_compare(const unsigned char *prefix, unsigned char plen,
 static int
 find_xroute_slot(const unsigned char *prefix, unsigned char plen,
                  const unsigned char *src_prefix, unsigned char src_plen,
+                 int table,
                  int *new_return)
 {
     int p, m, g, c;
@@ -105,7 +136,8 @@ find_xroute_slot(const unsigned char *prefix, unsigned char plen,
 
     do {
         m = (p + g) / 2;
-        c = xroute_compare(prefix, plen, src_prefix, src_plen, &xroutes[m]);
+        c = xroute_compare(prefix, plen, src_prefix, src_plen, table,
+                           &xroutes[m]);
         if(c == 0)
             return m;
         else if(c < 0)
@@ -125,22 +157,58 @@ struct xroute *
 find_xroute(const unsigned char *prefix, unsigned char plen,
             const unsigned char *src_prefix, unsigned char src_plen)
 {
-    int i = find_xroute_slot(prefix, plen, src_prefix, src_plen, NULL);
-    if(i >= 0)
-        return &xroutes[i];
+    int p, g, m, c;
+    int first = -1;
+    struct xroute *best = NULL;
 
-    return NULL;
+    if(numxroutes < 1)
+        return NULL;
+
+    p = 0;
+    g = numxroutes - 1;
+    while(p <= g) {
+        m = (p + g) / 2;
+        c = xroute_prefix_compare(prefix, plen, src_prefix, src_plen,
+                                  &xroutes[m]);
+        if(c == 0) {
+            first = m;
+            break;
+        } else if(c < 0) {
+            g = m - 1;
+        } else {
+            p = m + 1;
+        }
+    }
+
+    if(first < 0)
+        return NULL;
+
+    while(first > 0 &&
+          xroute_prefix_compare(prefix, plen, src_prefix, src_plen,
+                               &xroutes[first - 1]) == 0)
+        first--;
+
+    while(first < numxroutes &&
+          xroute_prefix_compare(prefix, plen, src_prefix, src_plen,
+                               &xroutes[first]) == 0) {
+        if(best == NULL || xroutes[first].metric < best->metric)
+            best = &xroutes[first];
+        first++;
+    }
+
+    return best;
 }
 
 int
 add_xroute(unsigned char prefix[16], unsigned char plen,
            unsigned char src_prefix[16], unsigned char src_plen,
-           unsigned short metric, unsigned int ifindex, int proto)
+           unsigned short metric, unsigned int ifindex,
+           int proto, int table)
 {
     int n = -1;
-    debugf("Adding xroute %s (src_plen=%d)\n",
-           format_prefix(prefix, plen), src_plen);
-    int i = find_xroute_slot(prefix, plen, src_prefix, src_plen, &n);
+    debugf("Adding xroute %s (src_plen=%d, table=%d)\n",
+           format_prefix(prefix, plen), src_plen, table);
+    int i = find_xroute_slot(prefix, plen, src_prefix, src_plen, table, &n);
     debugf("  -> find_xroute_slot returned i=%d, n=%d\n", i, n);
 
     if(i >= 0)
@@ -168,6 +236,7 @@ add_xroute(unsigned char prefix[16], unsigned char plen,
     xroutes[n].metric = metric;
     xroutes[n].ifindex = ifindex;
     xroutes[n].proto = proto;
+    xroutes[n].table = table;
     local_notify_xroute(&xroutes[n], LOCAL_ADD);
     return 1;
 }
@@ -372,6 +441,11 @@ kernel_route_compare(const void *v1, const void *v2)
     if(rc != 0)
         return rc;
 
+    if(route1->table < route2->table)
+        return -1;
+    if(route1->table > route2->table)
+        return 1;
+
     return 0;
 }
 
@@ -440,11 +514,19 @@ kernel_route_notify(int add, struct kernel_route *kroute, void *closure)
         return;
 
     i = find_xroute_slot(kroute->prefix, kroute->plen,
-                         kroute->src_prefix, kroute->src_plen, NULL);
+                         kroute->src_prefix, kroute->src_plen,
+                         kroute->table, NULL);
+    debugf("Kernel route lookup: %s table=%d -> i=%d%s\n",
+           format_prefix(kroute->prefix, kroute->plen),
+           kroute->table, i,
+           i >= 0 ? " (matched xroute)" : " (no xroute match)");
     if(!add) {
-        if(i >= 0)
+        if(i >= 0) {
+            debugf("Deleting kernel route matched xroute table=%d (kernel table=%d) for %s\n",
+                   xroutes[i].table, kroute->table,
+                   format_prefix(kroute->prefix, kroute->plen));
             flush_xroute(&xroutes[i], 1);
-        else
+        } else
             debugf("Flushing unknown route.\n");
         return;
     }
@@ -460,7 +542,7 @@ kernel_route_notify(int add, struct kernel_route *kroute, void *closure)
     rc = add_xroute(kroute->prefix, kroute->plen,
                     kroute->src_prefix, kroute->src_plen,
                     kroute->metric, kroute->ifindex,
-                    kroute->proto);
+                    kroute->proto, kroute->table);
     if(rc > 0) {
         flush_duplicate_route(kroute);
         send_update(NULL, 0, kroute->prefix, kroute->plen,
@@ -572,6 +654,7 @@ check_xroutes(int send_updates, int warn, int check_infinity)
             else
                 rc = xroute_compare(routes[i].prefix, routes[i].plen,
                                     routes[i].src_prefix, routes[i].src_plen,
+                                    routes[i].table,
                                     &xroutes[j]);
             if(rc < 0) {
                 /* Add route i. */
@@ -583,7 +666,7 @@ check_xroutes(int send_updates, int warn, int check_infinity)
                 rc = add_xroute(routes[i].prefix, routes[i].plen,
                                 routes[i].src_prefix, routes[i].src_plen,
                                 routes[i].metric, routes[i].ifindex,
-                                routes[i].proto);
+                                routes[i].proto, routes[i].table);
                 if(rc > 0) {
                     flush_duplicate_route(&routes[i]);
                     if(send_updates)
