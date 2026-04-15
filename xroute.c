@@ -497,8 +497,9 @@ kernel_route_notify(int add, struct kernel_route *kroute, void *closure)
     struct filter_result filter_result;
     int i, rc;
 
-    debugf("Kernel route: %s %s",
-           add ? "add" : "del", format_prefix(kroute->prefix, kroute->plen));
+        debugf("Kernel route: %s %s (src_plen=%d, table=%d)",
+            add ? "add" : "del", format_prefix(kroute->prefix, kroute->plen),
+            kroute->src_plen, kroute->table);
 
     kroute->metric = redistribute_filter(kroute->prefix, kroute->plen,
                                          kroute->src_prefix, kroute->src_plen,
@@ -600,9 +601,9 @@ check_xroutes(int send_updates, int warn, int check_infinity)
             memcpy(routes[i].src_prefix, filter_result.src_prefix, 16);
             routes[i].src_plen = filter_result.src_plen;
         }
-        debugf("Route after filter: %s src_plen=%d metric %d\n",
+        debugf("Route after filter: %s src_plen=%d table=%d metric %d\n",
                 format_prefix(routes[i].prefix, routes[i].plen),
-                routes[i].src_plen, routes[i].metric);
+            routes[i].src_plen, routes[i].table, routes[i].metric);
     }
 
     qsort(routes, numroutes, sizeof(struct kernel_route), kernel_route_compare);
@@ -646,7 +647,11 @@ check_xroutes(int send_updates, int warn, int check_infinity)
         j = 0;
         
         while(i < numroutes || j < numxroutes) {
-            debugf("Index i=%d, j=%d, numroutes=%d, numxroutes=%d\n", i, j, numroutes, numxroutes);
+                 debugf("Index i=%d, j=%d, numroutes=%d, numxroutes=%d"
+                     " (route_table=%d, xroute_table=%d)\n",
+                     i, j, numroutes, numxroutes,
+                     i < numroutes ? routes[i].table : -1,
+                     j < numxroutes ? xroutes[j].table : -1);
             if(i >= numroutes)
                 rc = +1;
             else if(j >= numxroutes)
