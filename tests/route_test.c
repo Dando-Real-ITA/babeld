@@ -36,6 +36,8 @@ THE SOFTWARE.
 #include "../route.h"
 #include "../source.h"
 #include "../util.h"
+#include "../message.h"
+#include "../xroute.h"
 
 #define N_ROUTES 6
 
@@ -816,6 +818,129 @@ void change_route_metric_test(void)
     }
 }
 
+void flush_xroute_reannounces_more_specific_test(void)
+{
+    struct interface *ifp;
+    struct xroute *xroute;
+    unsigned char prefix104[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x00, 0x02,
+         0x00, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00};
+    unsigned char prefix112[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x00, 0x02,
+         0x00, 0x01, 0x00, 0x01, 0x01, 0xaa, 0x00, 0x00};
+    unsigned char zeroes[16] = {0};
+    int i, saw_104 = 0, saw_112 = 0;
+
+    ifp = add_interface("test_if", NULL);
+    ifp->flags |= IF_UP;
+    ifp->hello_interval = 4000;
+    ifp->update_interval = 4000;
+    ifp->buf.size = 512;
+
+    if(add_xroute(prefix104, 104, zeroes, 0, 32, ifp->ifindex,
+                  RTPROT_BABEL_LOCAL, 254) <= 0 ||
+       add_xroute(prefix112, 112, zeroes, 0, 32, ifp->ifindex,
+                  RTPROT_BABEL_LOCAL, 254) <= 0) {
+        babel_check(0);
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr, "Failed test on flush_xroute_reannounces_more_specific_test setup.\n");
+        goto cleanup;
+    }
+
+    xroute = find_xroute(prefix104, 104, zeroes, 0);
+    if(!babel_check(xroute != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr, "Failed test on flush_xroute_reannounces_more_specific_test: missing /104 xroute.\n");
+        goto cleanup;
+    }
+
+    flush_xroute(xroute, 1);
+
+    for(i = 0; i < ifp->num_buffered_updates; i++) {
+        struct buffered_update *u = &ifp->buffered_updates[i];
+        if(u->plen == 104 && memcmp(u->prefix, prefix104, 16) == 0)
+            saw_104 = 1;
+        if(u->plen == 112 && memcmp(u->prefix, prefix112, 16) == 0)
+            saw_112 = 1;
+    }
+
+    if(!babel_check(saw_104 && saw_112)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on flush_xroute_reannounces_more_specific_test.\n");
+        fprintf(stderr,
+                "Expected buffered updates for both withdrawn /104 and covered /112.\n");
+        fprintf(stderr, "Buffered updates: %d, saw /104: %d, saw /112: %d.\n",
+                ifp->num_buffered_updates, saw_104, saw_112);
+    }
+
+cleanup:
+    xroute = find_xroute(prefix112, 112, zeroes, 0);
+    if(xroute)
+        flush_xroute(xroute, 0);
+    free(ifp->buffered_updates);
+    ifp->buffered_updates = NULL;
+    ifp->num_buffered_updates = 0;
+    ifp->update_bufsize = 0;
+    ifp->update_flush_timeout.tv_sec = 0;
+    ifp->update_flush_timeout.tv_usec = 0;
+}
+
+void kernel_delete_retracted_route_clears_installed_state_test(void)
+{
+    int i;
+    struct babel_route *route = NULL;
+    struct kernel_route kroute;
+
+    for(i = 0; i < route_slots; i++) {
+        struct babel_route *r = routes[i];
+        while(r) {
+            if(r->neigh == ns[1]) {
+                route = r;
+                break;
+            }
+            r = r->next;
+        }
+        if(route)
+            break;
+    }
+
+    if(!babel_check(route != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on kernel_delete_retracted_route_clears_installed_state_test setup (missing route).\n");
+        return;
+    }
+
+    retract_neighbour_routes(ns[1]);
+
+    if(!babel_check(route->installed && route->installed_table_count > 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on kernel_delete_retracted_route_clears_installed_state_test setup (route not installed before delete).\n");
+        return;
+    }
+
+    memset(&kroute, 0, sizeof(kroute));
+    memcpy(kroute.prefix, route->src->prefix, 16);
+    kroute.plen = route->src->plen;
+    memcpy(kroute.src_prefix, route->src->src_prefix, 16);
+    kroute.src_plen = route->src->src_plen;
+    kroute.table = 0;
+    kroute.proto = RTPROT_BABEL;
+
+    kernel_route_notify(0, &kroute, NULL);
+
+    if(!babel_check(!route->installed && route->installed_table_count == 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on kernel_delete_retracted_route_clears_installed_state_test.\n");
+        fprintf(stderr,
+                "Expected route to be uninstalled after kernel delete notification; installed=%d tables=%d.\n",
+                route->installed, route->installed_table_count);
+    }
+}
+
 void route_setup(void) {
     int i;
     struct interface *ifp = add_interface("test_if", NULL);
@@ -899,6 +1024,10 @@ void route_test_suite(void)
     run_test(update_feasible_test, "update_feasible_test");
     run_test(change_smoothing_half_life_test, "change_smoothing_half_life_test");
     run_route_test(change_route_metric_test, "change_route_metric_test");
+    run_test(flush_xroute_reannounces_more_specific_test,
+             "flush_xroute_reannounces_more_specific_test");
+    run_route_test(kernel_delete_retracted_route_clears_installed_state_test,
+                   "kernel_delete_retracted_route_clears_installed_state_test");
     fprintf(stderr, "-----------------------------------------------\n");
     fprintf(stderr, "Executed tests\n");
 }

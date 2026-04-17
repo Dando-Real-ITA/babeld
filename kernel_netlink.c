@@ -1273,7 +1273,8 @@ filter_kernel_routes(struct nlmsghdr *nh, struct kernel_route *route)
     rtm = (struct rtmsg*)NLMSG_DATA(nh);
     len -= NLMSG_LENGTH(0);
 
-    if(rtm->rtm_protocol == RTPROT_BABEL)
+    if(rtm->rtm_protocol == RTPROT_BABEL &&
+       nh->nlmsg_type != RTM_DELROUTE)
         return 0;
 
     /* Ignore cached routes, advertised by some kernels (linux 3.x). */

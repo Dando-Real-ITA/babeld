@@ -43,6 +43,28 @@ THE SOFTWARE.
 static struct xroute *xroutes;
 static int numxroutes = 0, maxxroutes = 0;
 
+static void
+send_covered_xroute_updates(const unsigned char *prefix, unsigned char plen,
+                            const unsigned char *src_prefix,
+                            unsigned char src_plen)
+{
+    int i;
+
+    for(i = 0; i < numxroutes; i++) {
+        if(xroutes[i].plen <= plen)
+            continue;
+        if(xroutes[i].src_plen != src_plen)
+            continue;
+        if(memcmp(xroutes[i].src_prefix, src_prefix, 16) != 0)
+            continue;
+        if(!in_prefix(xroutes[i].prefix, prefix, plen))
+            continue;
+
+        send_update(NULL, 0, xroutes[i].prefix, xroutes[i].plen,
+                    xroutes[i].src_prefix, xroutes[i].src_plen);
+    }
+}
+
 static int
 normalise_table(int table)
 {
@@ -296,8 +318,10 @@ flush_xroute(struct xroute *xroute, int send_updates)
         if(send_updates)
             send_update(NULL, 0, prefix, plen, src_prefix, src_plen);
     } else {
-        if(send_updates)
+        if(send_updates) {
             send_update_resend(NULL, prefix, plen, src_prefix, src_plen);
+            send_covered_xroute_updates(prefix, plen, src_prefix, src_plen);
+        }
     }
 }
 
@@ -485,6 +509,52 @@ route_installed_in_table(const struct babel_route *route, int table)
     return 0;
 }
 
+static int
+remove_installed_table(struct babel_route *route, int table)
+{
+    int i;
+
+    for(i = 0; i < route->installed_table_count; i++) {
+        if(route->installed_tables[i] != table)
+            continue;
+
+        if(i < route->installed_table_count - 1) {
+            memmove(&route->installed_tables[i], &route->installed_tables[i + 1],
+                    (route->installed_table_count - i - 1) * sizeof(int));
+        }
+        route->installed_table_count--;
+        return 1;
+    }
+
+    return 0;
+}
+
+static void
+sync_deleted_babel_route(struct kernel_route *kroute)
+{
+    struct babel_route *route;
+    int duplicate_i = -1;
+
+    do {
+        route = find_installed_route(NULL, kroute->prefix, kroute->plen,
+                                     kroute->src_prefix, kroute->src_plen,
+                                     &duplicate_i);
+        if(route == NULL)
+            break;
+
+        if(!remove_installed_table(route, kroute->table))
+            continue;
+
+        local_notify_route(route, LOCAL_CHANGE);
+        if(route->installed_table_count == 0) {
+            unsigned short oldmetric = route_metric(route);
+            route->installed = 0;
+            if(oldmetric < INFINITY)
+                route_lost(route->src, oldmetric);
+        }
+    } while(has_duplicate_default && is_default(kroute->prefix, kroute->plen));
+}
+
 static void
 flush_duplicate_route(struct kernel_route *kroute) {
     debugf("Checking for duplicate routes to %s (src_plen=%d) in table %d\n",
@@ -515,6 +585,18 @@ kernel_route_notify(int add, struct kernel_route *kroute, void *closure)
     debugf("Kernel route: %s %s (src_plen=%d, table=%d)",
            add ? "add" : "del", format_prefix(kroute->prefix, kroute->plen),
            kroute->src_plen, kroute->table);
+
+    if(kroute->proto == RTPROT_BABEL) {
+        if(!add) {
+            if(!kernel_route_operation_in_progress()) {
+                debugf("Reconciling external Babel delete notify for %s (src_plen=%d, table=%d).\n",
+                       format_prefix(kroute->prefix, kroute->plen),
+                       kroute->src_plen, kroute->table);
+                sync_deleted_babel_route(kroute);
+            }
+        }
+        return;
+    }
 
     kroute->metric = redistribute_filter(kroute->prefix, kroute->plen,
                                          kroute->src_prefix, kroute->src_plen,

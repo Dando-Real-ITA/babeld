@@ -50,6 +50,13 @@ int diversity_factor = 256;     /* in units of 1/256 */
 
 int smoothing_half_life = 0;
 int two_to_the_one_over_hl = 0; /* 2^(1/hl) * 0x10000 */
+static int kernel_route_operation_depth = 0;
+
+int
+kernel_route_operation_in_progress(void)
+{
+    return kernel_route_operation_depth > 0;
+}
 
 /* We maintain a list of "slots", ordered by prefix.  Every slot
    contains a linked list of the routes to this prefix, with the
@@ -562,12 +569,15 @@ change_route(int operation, const struct babel_route *route, int metric,
             newtable = table;
         }
 
+        kernel_route_operation_depth++;
         rc = kernel_route(operation, table, route->src->prefix, route->src->plen,
                             route->src->src_prefix, route->src->src_plen, pref_src,
                             route->nexthop, ifindex,
                             metric, new_next_hop, new_ifindex, new_metric,
                             operation == ROUTE_MODIFY ? newtable : 0,
                             newpref_src);
+
+        kernel_route_operation_depth--;
 
         if(rc < 0) {
             /* Continue to attempt other tables, but save first error */
