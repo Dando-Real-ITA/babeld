@@ -41,6 +41,7 @@ int add_xroute(unsigned char prefix[16], unsigned char plen,
                int proto, int table);
 void flush_xroute(struct xroute *xroute, int send_update);
 int xroutes_estimate(void);
+int format_xroute_metrics(const struct xroute *xroute, char *buf, int len);
 struct xroute_stream *xroute_stream();
 struct xroute *xroute_stream_next(struct xroute_stream *stream);
 void xroute_stream_done(struct xroute_stream *stream);

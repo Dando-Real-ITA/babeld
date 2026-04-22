@@ -1053,13 +1053,26 @@ dump_route(FILE *out, struct babel_route *route)
 static void
 dump_xroute(FILE *out, struct xroute *xroute)
 {
+    char metrics_buf[384];
     const char *dst_prefix = format_prefix(xroute->prefix, xroute->plen);
     const char *src_prefix = format_prefix(xroute->src_prefix,
                                            xroute->src_plen);
 
-    fprintf(out, "xroute %s-%s prefix %s from %s metric %d table %d (exported)\n",
+    if(format_xroute_metrics(xroute, metrics_buf, sizeof(metrics_buf)) < 0) {
+        int metric = MIN((int)xroute->metric +
+                         output_filter(NULL,
+                                       xroute->prefix, xroute->plen,
+                                       xroute->src_prefix, xroute->src_plen,
+                                       0),
+                         INFINITY);
+        snprintf(metrics_buf, sizeof(metrics_buf),
+             "metric-generic %d", metric);
+        metrics_buf[sizeof(metrics_buf) - 1] = '\0';
+    }
+
+    fprintf(out, "xroute %s-%s prefix %s from %s %s table %d\n",
             dst_prefix, src_prefix, dst_prefix, src_prefix,
-            xroute->metric, xroute->table);
+            metrics_buf, xroute->table);
 }
 
 static void

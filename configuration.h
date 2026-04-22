@@ -84,6 +84,12 @@ int output_filter(const unsigned char *id,
                   const unsigned char *prefix, unsigned short plen,
                   const unsigned char *src_prefix, unsigned short src_plen,
                   unsigned int ifindex);
+int output_filter_per_if(const unsigned char *id,
+                         const unsigned char *prefix, unsigned short plen,
+                         const unsigned char *src_prefix,
+                         unsigned short src_plen,
+                         unsigned int ifindex,
+                         int *add_metric_return);
 int redistribute_filter(const unsigned char *prefix, unsigned short plen,
                     const unsigned char *src_prefix, unsigned short src_plen,
                     unsigned int ifindex, int proto,

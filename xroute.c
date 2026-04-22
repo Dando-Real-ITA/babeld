@@ -43,6 +43,48 @@ THE SOFTWARE.
 static struct xroute *xroutes;
 static int numxroutes = 0, maxxroutes = 0;
 
+int
+format_xroute_metrics(const struct xroute *xroute, char *buf, int len)
+{
+    int metric, rc;
+    struct interface *ifp;
+
+    if(len <= 0)
+        return -1;
+
+    metric = MIN((int)xroute->metric +
+                 output_filter(NULL,
+                               xroute->prefix, xroute->plen,
+                               xroute->src_prefix, xroute->src_plen,
+                               0),
+                 INFINITY);
+    rc = snprintf(buf, len, "metric-generic %d", metric);
+    if(rc < 0 || rc >= len)
+        return -1;
+
+    FOR_ALL_INTERFACES(ifp) {
+        int add_metric;
+
+        if(!output_filter_per_if(NULL,
+                                 xroute->prefix, xroute->plen,
+                                 xroute->src_prefix, xroute->src_plen,
+                                 ifp->ifindex,
+                                 &add_metric))
+            continue;
+
+        metric = MIN((int)xroute->metric + add_metric, INFINITY);
+        if(rc < len) {
+            int n = snprintf(buf + rc, len - rc,
+                             " metric-if %s %d", ifp->name, metric);
+            if(n < 0 || n >= len - rc)
+                return -1;
+            rc += n;
+        }
+    }
+
+    return rc;
+}
+
 static void
 send_covered_xroute_updates(const unsigned char *prefix, unsigned char plen,
                             const unsigned char *src_prefix,
@@ -534,16 +576,31 @@ sync_deleted_babel_route(struct kernel_route *kroute)
 {
     struct babel_route *route;
     int duplicate_i = -1;
+    int matched = 0;
 
     do {
+        int before_count;
+
         route = find_installed_route(NULL, kroute->prefix, kroute->plen,
                                      kroute->src_prefix, kroute->src_plen,
                                      &duplicate_i);
         if(route == NULL)
             break;
 
-        if(!remove_installed_table(route, kroute->table))
+        matched = 1;
+        before_count = route->installed_table_count;
+
+        if(!remove_installed_table(route, kroute->table)) {
+            debugf("Babel delete reconcile: no matching installed table for %s (src_plen=%d, table=%d, current tables=%d).\n",
+                   format_prefix(kroute->prefix, kroute->plen),
+                   kroute->src_plen, kroute->table, before_count);
             continue;
+        }
+
+        debugf("Babel delete reconcile: installed tables decremented for %s (src_plen=%d, table=%d, tables %d -> %d).\n",
+               format_prefix(kroute->prefix, kroute->plen),
+               kroute->src_plen, kroute->table,
+               before_count, route->installed_table_count);
 
         local_notify_route(route, LOCAL_CHANGE);
         if(route->installed_table_count == 0) {
@@ -553,6 +610,12 @@ sync_deleted_babel_route(struct kernel_route *kroute)
                 route_lost(route->src, oldmetric);
         }
     } while(has_duplicate_default && is_default(kroute->prefix, kroute->plen));
+
+    if(!matched) {
+        debugf("Babel delete reconcile: no installed Babel route matched %s (src_plen=%d, table=%d).\n",
+               format_prefix(kroute->prefix, kroute->plen),
+               kroute->src_plen, kroute->table);
+    }
 }
 
 static void
@@ -586,15 +649,35 @@ kernel_route_notify(int add, struct kernel_route *kroute, void *closure)
            add ? "add" : "del", format_prefix(kroute->prefix, kroute->plen),
            kroute->src_plen, kroute->table);
 
-    if(kroute->proto == RTPROT_BABEL) {
-        if(!add) {
-            if(!kernel_route_operation_in_progress()) {
-                debugf("Reconciling external Babel delete notify for %s (src_plen=%d, table=%d).\n",
-                       format_prefix(kroute->prefix, kroute->plen),
-                       kroute->src_plen, kroute->table);
-                sync_deleted_babel_route(kroute);
-            }
+    if(!add) {
+        if(kroute->proto == RTPROT_BABEL &&
+           !kernel_route_operation_in_progress()) {
+            debugf("Reconciling external Babel delete notify for %s (src_plen=%d, table=%d).\n",
+                   format_prefix(kroute->prefix, kroute->plen),
+                   kroute->src_plen, kroute->table);
+            sync_deleted_babel_route(kroute);
         }
+
+        i = find_xroute_slot(kroute->prefix, kroute->plen,
+                             kroute->src_prefix, kroute->src_plen,
+                             kroute->table, NULL);
+        debugf("Kernel route delete lookup: %s table=%d -> i=%d%s\n",
+               format_prefix(kroute->prefix, kroute->plen),
+               kroute->table, i,
+               i >= 0 ? " (matched xroute)" : " (no xroute match)");
+
+        if(i >= 0) {
+            debugf("Deleting kernel route matched xroute table=%d (kernel table=%d) for %s\n",
+                   xroutes[i].table, kroute->table,
+                   format_prefix(kroute->prefix, kroute->plen));
+            flush_xroute(&xroutes[i], 1);
+        } else {
+            debugf("Flushing unknown route.\n");
+        }
+        return;
+    }
+
+    if(kroute->proto == RTPROT_BABEL) {
         return;
     }
 
@@ -618,16 +701,6 @@ kernel_route_notify(int add, struct kernel_route *kroute, void *closure)
            format_prefix(kroute->prefix, kroute->plen),
            kroute->table, i,
            i >= 0 ? " (matched xroute)" : " (no xroute match)");
-    if(!add) {
-        if(i >= 0) {
-            debugf("Deleting kernel route matched xroute table=%d (kernel table=%d) for %s\n",
-                   xroutes[i].table, kroute->table,
-                   format_prefix(kroute->prefix, kroute->plen));
-            flush_xroute(&xroutes[i], 1);
-        } else
-            debugf("Flushing unknown route.\n");
-        return;
-    }
 
     if(i >= 0) {
         modify_xroute(i, kroute, 1);

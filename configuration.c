@@ -1721,6 +1721,29 @@ output_filter(const unsigned char *id,
 }
 
 int
+output_filter_per_if(const unsigned char *id,
+                     const unsigned char *prefix, unsigned short plen,
+                     const unsigned char *src_prefix, unsigned short src_plen,
+                     unsigned int ifindex,
+                     int *add_metric_return)
+{
+    struct filter *f = output_filters;
+
+    while(f) {
+        if(f->ifname && filter_match(f, id, prefix, plen,
+                                     src_prefix, src_plen,
+                                     NULL, ifindex, 0)) {
+            if(add_metric_return)
+                *add_metric_return = f->action.add_metric;
+            return 1;
+        }
+        f = f->next;
+    }
+
+    return 0;
+}
+
+int
 redistribute_filter(const unsigned char *prefix, unsigned short plen,
                     const unsigned char *src_prefix, unsigned short src_plen,
                     unsigned int ifindex, int proto,

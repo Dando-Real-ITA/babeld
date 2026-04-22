@@ -197,19 +197,33 @@ local_notify_neighbour(struct neighbour *neigh, int kind)
 static void
 local_notify_xroute_1(struct local_socket *s, struct xroute *xroute, int kind)
 {
-    char buf[512];
+    char buf[1024], metrics_buf[384];
     int rc;
     const char *dst_prefix = format_prefix(xroute->prefix,
                                            xroute->plen);
     const char *src_prefix = format_prefix(xroute->src_prefix,
                                            xroute->src_plen);
 
-    rc = snprintf(buf, 512,
-                  "%s xroute %s-%s prefix %s from %s metric %d table %d (exported)\n",
-                  local_kind(kind), dst_prefix, src_prefix,
-                  dst_prefix, src_prefix, xroute->metric, xroute->table);
+    rc = format_xroute_metrics(xroute, metrics_buf, sizeof(metrics_buf));
+    if(rc < 0) {
+        int metric = MIN((int)xroute->metric +
+                         output_filter(NULL,
+                                       xroute->prefix, xroute->plen,
+                                       xroute->src_prefix, xroute->src_plen,
+                                       0),
+                         INFINITY);
+        rc = snprintf(metrics_buf, sizeof(metrics_buf),
+                  "metric-generic %d", metric);
+        if(rc < 0 || rc >= (int)sizeof(metrics_buf))
+            goto fail;
+    }
 
-    if(rc < 0 || rc >= 512)
+    rc = snprintf(buf, sizeof(buf),
+                  "%s xroute %s-%s prefix %s from %s %s table %d\n",
+                  local_kind(kind), dst_prefix, src_prefix,
+                  dst_prefix, src_prefix, metrics_buf, xroute->table);
+
+    if(rc < 0 || rc >= (int)sizeof(buf))
         goto fail;
 
     rc = write_timeout(s->fd, buf, rc);

@@ -21,6 +21,7 @@ THE SOFTWARE.
 */
 
 #include <arpa/inet.h>
+#include <net/if.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -941,6 +942,195 @@ void kernel_delete_retracted_route_clears_installed_state_test(void)
     }
 }
 
+void kernel_delete_babel_proto_flushes_matching_xroute_test(void)
+{
+    struct interface *ifp;
+    struct kernel_route kroute;
+    struct xroute *xroute;
+    unsigned char prefix[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x00, 0x10,
+         0x00, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00};
+    unsigned char zeroes[16] = {0};
+
+    ifp = add_interface("test_if", NULL);
+    if(!babel_check(ifp != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on kernel_delete_babel_proto_flushes_matching_xroute_test setup (missing interface).\n");
+        return;
+    }
+
+    if(add_xroute(prefix, 96, zeroes, 0, 32, ifp->ifindex,
+                  RTPROT_BABEL_LOCAL, 254) <= 0) {
+        babel_check(0);
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on kernel_delete_babel_proto_flushes_matching_xroute_test setup (add_xroute failed).\n");
+        return;
+    }
+
+    xroute = find_xroute(prefix, 96, zeroes, 0);
+    if(!babel_check(xroute != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on kernel_delete_babel_proto_flushes_matching_xroute_test setup (xroute not found).\n");
+        return;
+    }
+
+    memset(&kroute, 0, sizeof(kroute));
+    memcpy(kroute.prefix, prefix, 16);
+    kroute.plen = 96;
+    memcpy(kroute.src_prefix, zeroes, 16);
+    kroute.src_plen = 0;
+    kroute.table = 0;
+    kroute.proto = RTPROT_BABEL;
+
+    kernel_route_notify(0, &kroute, NULL);
+
+    xroute = find_xroute(prefix, 96, zeroes, 0);
+    if(!babel_check(xroute == NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on kernel_delete_babel_proto_flushes_matching_xroute_test.\n");
+        fprintf(stderr,
+                "Expected matching xroute to be flushed on delete notify with proto RTPROT_BABEL.\n");
+
+        /* Cleanup in failure path. */
+        flush_xroute(xroute, 0);
+    }
+}
+
+void format_xroute_metrics_labels_test(void)
+{
+    char ifname[IF_NAMESIZE];
+    unsigned int ifindex;
+    struct interface *ifp;
+    struct xroute xr;
+    struct filter *generic_filter = NULL;
+    struct filter *per_if_filter = NULL;
+    char metrics_buf[256];
+    int rc;
+    int expected_generic;
+    int expected_per_if;
+    char expected_generic_str[64];
+    char expected_per_if_str[96];
+
+    ifname[0] = '\0';
+    ifindex = 0;
+    for(unsigned int i = 1; i < 256; i++) {
+        if(if_indextoname(i, ifname) != NULL) {
+            ifindex = i;
+            break;
+        }
+    }
+
+    if(ifindex == 0) {
+        if(!babel_check(0)) {
+            fprintf(stderr, "-----------------------------------------------\n");
+            fprintf(stderr,
+                    "Failed test on format_xroute_metrics_labels_test setup (no interface found).\n");
+        }
+        return;
+    }
+
+    ifp = add_interface(ifname, NULL);
+    if(ifp == NULL) {
+        if(!babel_check(0)) {
+            fprintf(stderr, "-----------------------------------------------\n");
+            fprintf(stderr,
+                    "Failed test on format_xroute_metrics_labels_test setup (add_interface failed).\n");
+        }
+        return;
+    }
+    ifp->ifindex = ifindex;
+
+    memset(&xr, 0, sizeof(xr));
+    xr.plen = 64;
+    xr.src_plen = 0;
+    xr.metric = 100;
+
+    generic_filter = calloc(1, sizeof(struct filter));
+    per_if_filter = calloc(1, sizeof(struct filter));
+    if(generic_filter == NULL || per_if_filter == NULL) {
+        free(generic_filter);
+        free(per_if_filter);
+        if(!babel_check(0)) {
+            fprintf(stderr, "-----------------------------------------------\n");
+            fprintf(stderr,
+                    "Failed test on format_xroute_metrics_labels_test setup (calloc filter failed).\n");
+        }
+        return;
+    }
+
+    generic_filter->plen_le = 128;
+    generic_filter->src_plen_le = 128;
+    generic_filter->prefix = malloc(16);
+    generic_filter->src_prefix = malloc(16);
+    if(generic_filter->prefix == NULL || generic_filter->src_prefix == NULL) {
+        free(generic_filter->prefix);
+        free(generic_filter->src_prefix);
+        free(generic_filter);
+        free(per_if_filter);
+        if(!babel_check(0)) {
+            fprintf(stderr, "-----------------------------------------------\n");
+            fprintf(stderr,
+                    "Failed test on format_xroute_metrics_labels_test setup (malloc generic filter prefix failed).\n");
+        }
+        return;
+    }
+    memset(generic_filter->prefix, 0, 16);
+    memset(generic_filter->src_prefix, 0, 16);
+    generic_filter->plen = xr.plen;
+    generic_filter->src_plen = xr.src_plen;
+    generic_filter->action.add_metric = 10;
+    add_filter(generic_filter, FILTER_TYPE_OUTPUT);
+
+    per_if_filter->plen_le = 128;
+    per_if_filter->src_plen_le = 128;
+    per_if_filter->prefix = malloc(16);
+    per_if_filter->src_prefix = malloc(16);
+    per_if_filter->ifname = strdup(ifname);
+    if(per_if_filter->prefix == NULL || per_if_filter->src_prefix == NULL ||
+       per_if_filter->ifname == NULL) {
+        free(per_if_filter->prefix);
+        free(per_if_filter->src_prefix);
+        free(per_if_filter->ifname);
+        free(per_if_filter);
+        if(!babel_check(0)) {
+            fprintf(stderr, "-----------------------------------------------\n");
+            fprintf(stderr,
+                    "Failed test on format_xroute_metrics_labels_test setup (malloc per-if filter fields failed).\n");
+        }
+        return;
+    }
+    memset(per_if_filter->prefix, 0, 16);
+    memset(per_if_filter->src_prefix, 0, 16);
+    per_if_filter->plen = xr.plen;
+    per_if_filter->src_plen = xr.src_plen;
+    per_if_filter->ifindex = ifindex;
+    per_if_filter->action.add_metric = 42;
+    add_filter(per_if_filter, FILTER_TYPE_OUTPUT);
+
+    rc = format_xroute_metrics(&xr, metrics_buf, sizeof(metrics_buf));
+
+    expected_generic = MIN((int)xr.metric + 10, INFINITY);
+    expected_per_if = MIN((int)xr.metric + 42, INFINITY);
+    snprintf(expected_generic_str, sizeof(expected_generic_str),
+             "metric-generic %d", expected_generic);
+    snprintf(expected_per_if_str, sizeof(expected_per_if_str),
+             "metric-if %s %d", ifname, expected_per_if);
+
+    if(!babel_check(rc >= 0 &&
+                    strstr(metrics_buf, expected_generic_str) != NULL &&
+                    strstr(metrics_buf, expected_per_if_str) != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr, "Failed test on format_xroute_metrics_labels_test.\n");
+        fprintf(stderr, "Expected fragment: %s\n", expected_generic_str);
+        fprintf(stderr, "Expected fragment: %s\n", expected_per_if_str);
+        fprintf(stderr, "Actual metrics string: %s\n", metrics_buf);
+    }
+}
+
 void route_setup(void) {
     int i;
     struct interface *ifp = add_interface("test_if", NULL);
@@ -1010,6 +1200,8 @@ void run_route_test(void (*test)(void), char *test_name) {
 void route_test_suite(void)
 {
     run_test(route_compare_test, "route_compare_test");
+    run_test(format_xroute_metrics_labels_test,
+             "format_xroute_metrics_labels_test");
     run_route_test(find_route_slot_test, "find_route_slot_test");
     run_route_test(find_route_test, "find_route_test");
     run_route_test(find_installed_route_test, "find_installed_route_test");
@@ -1028,6 +1220,8 @@ void route_test_suite(void)
              "flush_xroute_reannounces_more_specific_test");
     run_route_test(kernel_delete_retracted_route_clears_installed_state_test,
                    "kernel_delete_retracted_route_clears_installed_state_test");
+    run_test(kernel_delete_babel_proto_flushes_matching_xroute_test,
+             "kernel_delete_babel_proto_flushes_matching_xroute_test");
     fprintf(stderr, "-----------------------------------------------\n");
     fprintf(stderr, "Executed tests\n");
 }
