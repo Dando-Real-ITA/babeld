@@ -77,6 +77,14 @@ THE SOFTWARE.
 #define MAX_INTERFACES 1024
 #endif
 
+#ifndef NETLINK_SOCKET_RCVBUF
+#define NETLINK_SOCKET_RCVBUF (128 * 1024 * 1024)
+#endif
+
+#ifndef NETLINK_RECVMSG_BUFSIZE
+#define NETLINK_RECVMSG_BUFSIZE (256 * 1024)
+#endif
+
 #define GET_PLEN(p, v4) (v4) ? (p) + 96 : (p)
 #define COPY_ADDR(d, rta, v4)                                           \
     do {                                                                \
@@ -302,7 +310,7 @@ static int
 netlink_socket(struct netlink *nl, uint32_t groups)
 {
     int rc, one = 1;
-    int rcvsize = 512 * 1024;
+    int rcvsize = NETLINK_SOCKET_RCVBUF;
 
     nl->sock = socket(PF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
     if(nl->sock < 0)
@@ -424,7 +432,7 @@ netlink_read(struct netlink *nl, struct netlink *nl_ignore, int answer,
     int len;
     int done = 0;
 
-    struct nlmsghdr buf[8192/sizeof(struct nlmsghdr)];
+    struct nlmsghdr buf[NETLINK_RECVMSG_BUFSIZE/sizeof(struct nlmsghdr)];
 
     memset(&nladdr, 0, sizeof(nladdr));
     nladdr.nl_family = AF_NETLINK;
@@ -438,6 +446,7 @@ netlink_read(struct netlink *nl, struct netlink *nl_ignore, int answer,
     iov.iov_base = &buf;
 
     do {
+        msg.msg_flags = 0;
         iov.iov_len = sizeof(buf);
         len = recvmsg(nl->sock, &msg, 0);
 
