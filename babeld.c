@@ -103,11 +103,6 @@ struct dump_route_counters {
     int ipv6_not_inst;
 };
 
-#define ipv4_exported ipv4_inst
-#define ipv4_not_exported ipv4_not_inst
-#define ipv6_exported ipv6_inst
-#define ipv6_not_exported ipv6_not_inst
-
 static int accept_local_connections(void);
 static void init_signals(void);
 static void dump_tables(FILE *out);
@@ -118,6 +113,17 @@ static int
 dump_prefix_is_ipv4(const unsigned char *prefix, unsigned char plen)
 {
     return plen >= 96 && v4mapped(prefix);
+}
+
+static int
+dump_xroute_generic_metric(const struct xroute *xroute)
+{
+    return MIN((int)xroute->metric +
+               output_filter(NULL,
+                             xroute->prefix, xroute->plen,
+                             xroute->src_prefix, xroute->src_plen,
+                             0),
+               INFINITY);
 }
 
 static void
@@ -1105,20 +1111,22 @@ dump_route(FILE *out, struct babel_route *route)
 }
 
 static void
-dump_xroute(FILE *out, struct xroute *xroute)
+dump_xroute(FILE *out, struct xroute *xroute,
+            struct dump_route_counters *xroute_counters)
 {
     char metrics_buf[384];
+    int metric;
     const char *dst_prefix = format_prefix(xroute->prefix, xroute->plen);
     const char *src_prefix = format_prefix(xroute->src_prefix,
                                            xroute->src_plen);
 
+    metric = dump_xroute_generic_metric(xroute);
+    if(xroute_counters)
+        count_dump_route(xroute_counters,
+                         xroute->prefix, xroute->plen,
+                         metric < INFINITY);
+
     if(format_xroute_metrics(xroute, metrics_buf, sizeof(metrics_buf)) < 0) {
-        int metric = MIN((int)xroute->metric +
-                         output_filter(NULL,
-                                       xroute->prefix, xroute->plen,
-                                       xroute->src_prefix, xroute->src_plen,
-                                       0),
-                         INFINITY);
         snprintf(metrics_buf, sizeof(metrics_buf),
              "metric-generic %d", metric);
         metrics_buf[sizeof(metrics_buf) - 1] = '\0';
@@ -1176,10 +1184,7 @@ dump_tables(FILE *out)
         while(1) {
             struct xroute *xroute = xroute_stream_next(xroutes);
             if(xroute == NULL) break;
-            count_dump_route(&xroute_counters,
-                             xroute->prefix, xroute->plen,
-                             xroute->metric < INFINITY);
-            dump_xroute(out, xroute);
+            dump_xroute(out, xroute, &xroute_counters);
         }
         xroute_stream_done(xroutes);
     }
@@ -1202,10 +1207,10 @@ dump_tables(FILE *out)
     fprintf(out,
             "Counters xroutes ipv4 exported %d ipv4 not exported %d "
             "ipv6 exported %d ipv6 not exported %d\n",
-            xroute_counters.ipv4_exported,
-            xroute_counters.ipv4_not_exported,
-            xroute_counters.ipv6_exported,
-            xroute_counters.ipv6_not_exported);
+            xroute_counters.ipv4_inst,
+            xroute_counters.ipv4_not_inst,
+            xroute_counters.ipv6_inst,
+            xroute_counters.ipv6_not_inst);
     fprintf(out,
             "Counters routes ipv4 inst %d ipv4 not inst %d "
             "ipv6 inst %d ipv6 not inst %d\n",

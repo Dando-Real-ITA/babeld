@@ -58,15 +58,21 @@ struct local_dump_route_counters {
     int ipv6_not_inst;
 };
 
-#define ipv4_exported ipv4_inst
-#define ipv4_not_exported ipv4_not_inst
-#define ipv6_exported ipv6_inst
-#define ipv6_not_exported ipv6_not_inst
-
 static int
 local_dump_prefix_is_ipv4(const unsigned char *prefix, unsigned char plen)
 {
     return plen >= 96 && v4mapped(prefix);
+}
+
+static int
+local_xroute_generic_metric(const struct xroute *xroute)
+{
+    return MIN((int)xroute->metric +
+               output_filter(NULL,
+                             xroute->prefix, xroute->plen,
+                             xroute->src_prefix, xroute->src_plen,
+                             0),
+               INFINITY);
 }
 
 static void
@@ -250,23 +256,25 @@ local_notify_neighbour(struct neighbour *neigh, int kind)
 }
 
 static void
-local_notify_xroute_1(struct local_socket *s, struct xroute *xroute, int kind)
+local_notify_xroute_1(struct local_socket *s, struct xroute *xroute, int kind,
+                      struct local_dump_route_counters *xroute_counters)
 {
     char buf[1024], metrics_buf[384];
     int rc;
+    int metric;
     const char *dst_prefix = format_prefix(xroute->prefix,
                                            xroute->plen);
     const char *src_prefix = format_prefix(xroute->src_prefix,
                                            xroute->src_plen);
 
+    metric = local_xroute_generic_metric(xroute);
+    if(xroute_counters)
+        local_count_dump_route(xroute_counters,
+                               xroute->prefix, xroute->plen,
+                               metric < INFINITY);
+
     rc = format_xroute_metrics(xroute, metrics_buf, sizeof(metrics_buf));
     if(rc < 0) {
-        int metric = MIN((int)xroute->metric +
-                         output_filter(NULL,
-                                       xroute->prefix, xroute->plen,
-                                       xroute->src_prefix, xroute->src_plen,
-                                       0),
-                         INFINITY);
         rc = snprintf(metrics_buf, sizeof(metrics_buf),
                   "metric-generic %d", metric);
         if(rc < 0 || rc >= (int)sizeof(metrics_buf))
@@ -297,7 +305,7 @@ local_notify_xroute(struct xroute *xroute, int kind)
     int i;
     for(i = 0; i < num_local_sockets; i++) {
         if(local_sockets[i].monitor)
-            local_notify_xroute_1(&local_sockets[i], xroute, kind);
+            local_notify_xroute_1(&local_sockets[i], xroute, kind, NULL);
     }
 }
 
@@ -419,10 +427,7 @@ local_notify_all_1(struct local_socket *s)
             struct xroute *xroute = xroute_stream_next(xroutes);
             if(xroute == NULL)
                 break;
-            local_count_dump_route(&xroute_counters,
-                                   xroute->prefix, xroute->plen,
-                                   xroute->metric < INFINITY);
-            local_notify_xroute_1(s, xroute, LOCAL_ADD);
+            local_notify_xroute_1(s, xroute, LOCAL_ADD, &xroute_counters);
         }
         xroute_stream_done(xroutes);
     }
@@ -450,10 +455,10 @@ local_notify_all_1(struct local_socket *s)
     rc = snprintf(buf, sizeof(buf),
                   "add counters xroutes ipv4 exported %d ipv4 not exported %d "
                   "ipv6 exported %d ipv6 not exported %d\n",
-                  xroute_counters.ipv4_exported,
-                  xroute_counters.ipv4_not_exported,
-                  xroute_counters.ipv6_exported,
-                  xroute_counters.ipv6_not_exported);
+                  xroute_counters.ipv4_inst,
+                  xroute_counters.ipv4_not_inst,
+                  xroute_counters.ipv6_inst,
+                  xroute_counters.ipv6_not_inst);
     if(rc < 0 || rc >= (int)sizeof(buf) || write_timeout(s->fd, buf, rc) < 0)
         goto fail;
 
