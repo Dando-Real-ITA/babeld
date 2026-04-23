@@ -96,11 +96,65 @@ struct timeval check_neighbours_timeout, check_interfaces_timeout;
 
 static volatile sig_atomic_t exiting = 0, dumping = 0, reopening = 0;
 
+struct dump_route_counters {
+    int ipv4_inst;
+    int ipv4_not_inst;
+    int ipv6_inst;
+    int ipv6_not_inst;
+};
+
+#define ipv4_exported ipv4_inst
+#define ipv4_not_exported ipv4_not_inst
+#define ipv6_exported ipv6_inst
+#define ipv6_not_exported ipv6_not_inst
+
 static int accept_local_connections(void);
 static void init_signals(void);
 static void dump_tables(FILE *out);
 static void init_hello();
 static void init_flow();
+
+static int
+dump_prefix_is_ipv4(const unsigned char *prefix, unsigned char plen)
+{
+    return plen >= 96 && v4mapped(prefix);
+}
+
+static void
+count_dump_route(struct dump_route_counters *counters,
+                 const unsigned char *prefix, unsigned char plen,
+                 int installed)
+{
+    if(dump_prefix_is_ipv4(prefix, plen)) {
+        if(installed)
+            counters->ipv4_inst++;
+        else
+            counters->ipv4_not_inst++;
+    } else {
+        if(installed)
+            counters->ipv6_inst++;
+        else
+            counters->ipv6_not_inst++;
+    }
+}
+
+static const char *
+dump_timestamp(time_t when, char *buf, size_t len)
+{
+    struct tm tm;
+    size_t written;
+
+    if(localtime_r(&when, &tm) == NULL)
+        goto fallback;
+
+    written = strftime(buf, len, "%Y-%m-%d %H:%M:%S %Z", &tm);
+    if(written > 0)
+        return buf;
+
+ fallback:
+    snprintf(buf, len, "%ld", (long)when);
+    return buf;
+}
 
 static void
 kernel_addr_notify(int add, struct kernel_addr *addr, void *closure)
@@ -1078,16 +1132,32 @@ dump_xroute(FILE *out, struct xroute *xroute)
 static void
 dump_tables(FILE *out)
 {
+    struct interface *ifp;
     struct neighbour *neigh;
     struct xroute_stream *xroutes;
     struct route_stream *routes;
+    struct dump_route_counters xroute_counters = {0, 0, 0, 0};
+    struct dump_route_counters route_counters = {0, 0, 0, 0};
+    time_t when;
+    char time_buf[64];
+    int interface_count = 0;
+    int neighbour_count = 0;
 
     fprintf(out, "\n");
 
+    when = now.tv_sec > 0 ? now.tv_sec : time(NULL);
+
     fprintf(out, "Daemon version %s\n", BABELD_VERSION);
-    fprintf(out, "My id %s seqno %d\n", format_eui64(myid), myseqno);
+    fprintf(out, "My id %s seqno %d at %s\n",
+            format_eui64(myid), myseqno,
+            dump_timestamp(when, time_buf, sizeof(time_buf)));
+
+    FOR_ALL_INTERFACES(ifp) {
+        interface_count++;
+    }
 
     FOR_ALL_NEIGHBOURS(neigh) {
+        neighbour_count++;
         fprintf(out, "Neighbour %s dev %s reach %04x ureach %04x "
                 "rxcost %u txcost %d rtt %s rttcost %u%s.\n",
                 format_address(neigh->address),
@@ -1106,6 +1176,9 @@ dump_tables(FILE *out)
         while(1) {
             struct xroute *xroute = xroute_stream_next(xroutes);
             if(xroute == NULL) break;
+            count_dump_route(&xroute_counters,
+                             xroute->prefix, xroute->plen,
+                             xroute->metric < INFINITY);
             dump_xroute(out, xroute);
         }
         xroute_stream_done(xroutes);
@@ -1116,10 +1189,28 @@ dump_tables(FILE *out)
         while(1) {
             struct babel_route *route = route_stream_next(routes);
             if(route == NULL) break;
+            count_dump_route(&route_counters,
+                     route->src->prefix, route->src->plen,
+                     route->installed);
             dump_route(out, route);
         }
         route_stream_done(routes);
     }
+
+    fprintf(out, "Counters interfaces %d neighbours %d\n",
+            interface_count, neighbour_count);
+    fprintf(out,
+            "Counters xroutes ipv4 exported %d ipv4 not exported %d "
+            "ipv6 exported %d ipv6 not exported %d\n",
+            xroute_counters.ipv4_exported,
+            xroute_counters.ipv4_not_exported,
+            xroute_counters.ipv6_exported,
+            xroute_counters.ipv6_not_exported);
+    fprintf(out,
+            "Counters routes ipv4 inst %d ipv4 not inst %d "
+            "ipv6 inst %d ipv6 not inst %d\n",
+            route_counters.ipv4_inst, route_counters.ipv4_not_inst,
+            route_counters.ipv6_inst, route_counters.ipv6_not_inst);
 
     fflush(out);
 }
