@@ -25,6 +25,7 @@ THE SOFTWARE.
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -49,6 +50,60 @@ int num_local_sockets = 0;
 int local_server_port = -1;
 char *local_server_path;
 int local_server_write = 0;
+
+struct local_dump_route_counters {
+    int ipv4_inst;
+    int ipv4_not_inst;
+    int ipv6_inst;
+    int ipv6_not_inst;
+};
+
+#define ipv4_exported ipv4_inst
+#define ipv4_not_exported ipv4_not_inst
+#define ipv6_exported ipv6_inst
+#define ipv6_not_exported ipv6_not_inst
+
+static int
+local_dump_prefix_is_ipv4(const unsigned char *prefix, unsigned char plen)
+{
+    return plen >= 96 && v4mapped(prefix);
+}
+
+static void
+local_count_dump_route(struct local_dump_route_counters *counters,
+                       const unsigned char *prefix, unsigned char plen,
+                       int installed)
+{
+    if(local_dump_prefix_is_ipv4(prefix, plen)) {
+        if(installed)
+            counters->ipv4_inst++;
+        else
+            counters->ipv4_not_inst++;
+    } else {
+        if(installed)
+            counters->ipv6_inst++;
+        else
+            counters->ipv6_not_inst++;
+    }
+}
+
+static const char *
+local_dump_timestamp(time_t when, char *buf, size_t len)
+{
+    struct tm tm;
+    size_t written;
+
+    if(localtime_r(&when, &tm) == NULL)
+        goto fallback;
+
+    written = strftime(buf, len, "%Y-%m-%d %H:%M:%S %Z", &tm);
+    if(written > 0)
+        return buf;
+
+ fallback:
+    snprintf(buf, len, "%ld", (long)when);
+    return buf;
+}
 
 static int
 write_timeout(int fd, const void *buf, int len)
@@ -308,13 +363,17 @@ local_notify_route(struct babel_route *route, int kind)
 static void
 local_notify_status_1(struct local_socket *s, int kind)
 {
-    char buf[512];
+    char buf[512], time_buf[64];
     int rc;
+    time_t when;
+
+    when = now.tv_sec > 0 ? now.tv_sec : time(NULL);
 
     rc = snprintf(buf, sizeof(buf),
-                  "%s daemon version %s my-id %s my-seqno %u\n",
+                  "%s daemon version %s my-id %s my-seqno %u at %s\n",
                   local_kind(kind), BABELD_VERSION,
-                  format_eui64(myid), (unsigned int)myseqno);
+                  format_eui64(myid), (unsigned int)myseqno,
+                  local_dump_timestamp(when, time_buf, sizeof(time_buf)));
     if(rc < 0 || rc >= (int)sizeof(buf))
         goto fail;
 
@@ -335,14 +394,22 @@ local_notify_all_1(struct local_socket *s)
     struct neighbour *neigh;
     struct xroute_stream *xroutes;
     struct route_stream *routes;
+    struct local_dump_route_counters xroute_counters = {0, 0, 0, 0};
+    struct local_dump_route_counters route_counters = {0, 0, 0, 0};
+    char buf[256];
+    int rc;
+    int interface_count = 0;
+    int neighbour_count = 0;
 
     local_notify_status_1(s, LOCAL_ADD);
 
     FOR_ALL_INTERFACES(ifp) {
+        interface_count++;
         local_notify_interface_1(s, ifp, LOCAL_ADD);
     }
 
     FOR_ALL_NEIGHBOURS(neigh) {
+        neighbour_count++;
         local_notify_neighbour_1(s, neigh, LOCAL_ADD);
     }
 
@@ -352,6 +419,9 @@ local_notify_all_1(struct local_socket *s)
             struct xroute *xroute = xroute_stream_next(xroutes);
             if(xroute == NULL)
                 break;
+            local_count_dump_route(&xroute_counters,
+                                   xroute->prefix, xroute->plen,
+                                   xroute->metric < INFINITY);
             local_notify_xroute_1(s, xroute, LOCAL_ADD);
         }
         xroute_stream_done(xroutes);
@@ -363,10 +433,42 @@ local_notify_all_1(struct local_socket *s)
             struct babel_route *route = route_stream_next(routes);
             if(route == NULL)
                 break;
+            local_count_dump_route(&route_counters,
+                                   route->src->prefix, route->src->plen,
+                                   route->installed);
             local_notify_route_1(s, route, LOCAL_ADD);
         }
         route_stream_done(routes);
     }
+
+    rc = snprintf(buf, sizeof(buf),
+                  "add counters interfaces %d neighbours %d\n",
+                  interface_count, neighbour_count);
+    if(rc < 0 || rc >= (int)sizeof(buf) || write_timeout(s->fd, buf, rc) < 0)
+        goto fail;
+
+    rc = snprintf(buf, sizeof(buf),
+                  "add counters xroutes ipv4 exported %d ipv4 not exported %d "
+                  "ipv6 exported %d ipv6 not exported %d\n",
+                  xroute_counters.ipv4_exported,
+                  xroute_counters.ipv4_not_exported,
+                  xroute_counters.ipv6_exported,
+                  xroute_counters.ipv6_not_exported);
+    if(rc < 0 || rc >= (int)sizeof(buf) || write_timeout(s->fd, buf, rc) < 0)
+        goto fail;
+
+    rc = snprintf(buf, sizeof(buf),
+                  "add counters routes ipv4 inst %d ipv4 not inst %d "
+                  "ipv6 inst %d ipv6 not inst %d\n",
+                  route_counters.ipv4_inst, route_counters.ipv4_not_inst,
+                  route_counters.ipv6_inst, route_counters.ipv6_not_inst);
+    if(rc < 0 || rc >= (int)sizeof(buf) || write_timeout(s->fd, buf, rc) < 0)
+        goto fail;
+
+    return;
+
+ fail:
+    shutdown(s->fd, 1);
     return;
 }
 
