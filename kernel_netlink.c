@@ -306,6 +306,28 @@ static struct netlink nl_command = { 0, -1, {0}, 0 };
 static struct netlink nl_listen = { 0, -1, {0}, 0 };
 static int nl_setup = 0;
 
+/* Check if a socket error indicates the socket is dead and needs recovery */
+static int
+is_socket_dead(int error)
+{
+    /* These errors indicate the netlink socket is no longer valid
+       and needs to be recreated */
+    return error == ENODEV || error == EINVAL || error == EBADF || 
+           error == ECONNREFUSED || error == ENOTCONN;
+}
+
+/* Safely close and mark a socket for recovery */
+static void
+close_socket_for_recovery(struct netlink *nl, const char *context, int error)
+{
+    if(nl->sock >= 0) {
+        kdebugf("%s: detected dead netlink socket (error: %s), marking for recovery\n",
+                context, strerror(error));
+        close(nl->sock);
+        nl->sock = -1;
+    }
+}
+
 static int
 netlink_socket(struct netlink *nl, uint32_t groups)
 {
@@ -462,6 +484,20 @@ netlink_read(struct netlink *nl, struct netlink *nl_ignore, int answer,
         }
 
         if(len < 0) {
+            /* Check if socket is dead and needs recovery */
+            if(is_socket_dead(errno)) {
+                close_socket_for_recovery(nl, "netlink_read", errno);
+                if(!answer) {
+                    /* For listening sockets, try to recover */
+                    if(nl == &nl_listen) {
+                        kdebugf("Recovering nl_listen socket\\n");
+                        kernel_setup_socket(0);
+                        kernel_setup_socket(1);
+                        check_interfaces();
+                    }
+                }
+                return -1;
+            }
             perror("netlink_read: recvmsg()");
             return -1;
         } else if(len == 0) {
@@ -577,10 +613,29 @@ netlink_talk(struct nlmsghdr *nh)
 
     if(rc < nh->nlmsg_len) {
         int saved_errno = errno;
+        /* Check if socket is dead */
+        if(is_socket_dead(saved_errno)) {
+            close_socket_for_recovery(&nl_command, "netlink_talk", saved_errno);
+            /* Try to recover by recreating socket */
+            rc = netlink_socket(&nl_command, 0);
+            if(rc >= 0) {
+                /* Re-send the message with new socket */
+                nh->nlmsg_seq = ++nl_command.seqno;
+                kdebugf("Retrying send with recovered socket, seqno %d\n", nl_command.seqno);
+                rc = sendmsg(nl_command.sock, &msg, 0);
+                if(rc >= nh->nlmsg_len) {
+                    /* Message sent successfully after recovery */
+                    check_interfaces();
+                    goto read_ack;
+                }
+            }
+        }
         perror("sendmsg");
         errno = saved_errno;
         return -1;
     }
+
+read_ack:
 
     rc = netlink_read(&nl_command, NULL, 1, NULL); /* ACK */
 
@@ -635,6 +690,23 @@ netlink_send_dump(int type, void *data, int len) {
     rc = sendmsg(nl_command.sock, &msg, 0);
     if(rc < buf.nh.nlmsg_len) {
         int saved_errno = errno;
+        /* Check if socket is dead */
+        if(is_socket_dead(saved_errno)) {
+            close_socket_for_recovery(&nl_command, "netlink_send_dump", saved_errno);
+            /* Try to recover by recreating socket */
+            rc = netlink_socket(&nl_command, 0);
+            if(rc >= 0) {
+                /* Re-send the dump request with new socket */
+                buf.nh.nlmsg_seq = ++nl_command.seqno;
+                kdebugf("Retrying dump send with recovered socket, seqno %d\n", nl_command.seqno);
+                rc = sendmsg(nl_command.sock, &msg, 0);
+                if(rc >= buf.nh.nlmsg_len) {
+                    /* Message sent successfully after recovery */
+                    check_interfaces();
+                    return 0;
+                }
+            }
+        }
         perror("sendmsg");
         errno = saved_errno;
         return -1;
@@ -831,8 +903,21 @@ kernel_interface_ipv4(const char *ifname, int ifindex, unsigned char *addr_r)
     strncpy(req.ifr_name, ifname, sizeof(req.ifr_name));
     req.ifr_addr.sa_family = AF_INET;
     rc = ioctl(dgram_socket, SIOCGIFADDR, &req);
-    if(rc < 0)
-        return -1;
+    if(rc < 0) {
+        /* Check if dgram_socket is dead */
+        if(is_socket_dead(errno)) {
+            kdebugf("kernel_interface_ipv4: dgram_socket appears dead (error: %s), recreating\n",
+                    strerror(errno));
+            if(dgram_socket >= 0)
+                close(dgram_socket);
+            dgram_socket = socket(PF_INET, SOCK_DGRAM, 0);
+            if(dgram_socket >= 0) {
+                rc = ioctl(dgram_socket, SIOCGIFADDR, &req);
+            }
+        }
+        if(rc < 0)
+            return -1;
+    }
 
     memcpy(addr_r, &((struct sockaddr_in*)&req.ifr_addr)->sin_addr, 4);
     return 1;
@@ -847,8 +932,21 @@ kernel_interface_mtu(const char *ifname, int ifindex)
     memset(&req, 0, sizeof(req));
     strncpy(req.ifr_name, ifname, sizeof(req.ifr_name));
     rc = ioctl(dgram_socket, SIOCGIFMTU, &req);
-    if(rc < 0)
-        return -1;
+    if(rc < 0) {
+        /* Check if dgram_socket is dead */
+        if(is_socket_dead(errno)) {
+            kdebugf("kernel_interface_mtu: dgram_socket appears dead (error: %s), recreating\n",
+                    strerror(errno));
+            if(dgram_socket >= 0)
+                close(dgram_socket);
+            dgram_socket = socket(PF_INET, SOCK_DGRAM, 0);
+            if(dgram_socket >= 0) {
+                rc = ioctl(dgram_socket, SIOCGIFMTU, &req);
+            }
+        }
+        if(rc < 0)
+            return -1;
+    }
 
     return req.ifr_mtu;
 }
@@ -930,11 +1028,28 @@ kernel_interface_wireless(const char *ifname, int ifindex)
     strncpy(req.ifr_name, ifname, sizeof(req.ifr_name));
     rc = ioctl(dgram_socket, SIOCGIWNAME, &req);
     if(rc < 0) {
-        if(errno == EOPNOTSUPP || errno == EINVAL)
-            rc = 0;
-        else {
-            perror("ioctl(SIOCGIWNAME)");
-            rc = -1;
+        /* Check if dgram_socket is dead before checking for expected errors */
+        if(is_socket_dead(errno)) {
+            kdebugf("kernel_interface_wireless: dgram_socket appears dead (error: %s), recreating\n",
+                    strerror(errno));
+            if(dgram_socket >= 0)
+                close(dgram_socket);
+            dgram_socket = socket(PF_INET, SOCK_DGRAM, 0);
+            if(dgram_socket >= 0) {
+                rc = ioctl(dgram_socket, SIOCGIWNAME, &req);
+            } else {
+                rc = -1;
+            }
+        }
+        if(rc < 0) {
+            if(errno == EOPNOTSUPP || errno == EINVAL)
+                rc = 0;
+            else {
+                perror("ioctl(SIOCGIWNAME)");
+                rc = -1;
+            }
+        } else {
+            rc = 1;
         }
     } else {
         rc = 1;
