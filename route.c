@@ -1033,6 +1033,20 @@ update_route(const unsigned char *id,
         oldsrc = route->src;
         oldmetric = route_metric(route);
 
+        if(refmetric >= INFINITY && oldinstalled && src == route->src) {
+            route->seqno = seqno;
+            route->hold_time = hold_time;
+
+            change_route_metric(route,
+                                refmetric, neighbour_cost(neigh), add_metric);
+
+            if(route->installed)
+                uninstall_route(route);
+
+            route_lost(oldsrc, oldmetric);
+            return route;
+        }
+
         /* If a successor switches sources, we must accept their update even
            if it makes a route unfeasible in order to break any routing loops
            in a timely manner.  If the source remains the same, we ignore

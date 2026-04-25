@@ -942,6 +942,57 @@ void kernel_delete_retracted_route_clears_installed_state_test(void)
     }
 }
 
+void explicit_retraction_uninstalls_route_test(void)
+{
+    int i;
+    struct babel_route *route = NULL;
+    unsigned short retract_seqno;
+
+    for(i = 0; i < route_slots; i++) {
+        struct babel_route *r = routes[i];
+        while(r) {
+            if(r->neigh == ns[1]) {
+                route = r;
+                break;
+            }
+            r = r->next;
+        }
+        if(route)
+            break;
+    }
+
+    if(!babel_check(route != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on explicit_retraction_uninstalls_route_test setup (missing route).\n");
+        return;
+    }
+
+    if(!babel_check(route->installed)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on explicit_retraction_uninstalls_route_test setup (route not installed).\n");
+        return;
+    }
+
+    retract_seqno = seqno_plus(route->seqno, 1);
+
+    update_route(route->src->id,
+                 route->src->prefix, route->src->plen,
+                 route->src->src_prefix, route->src->src_plen,
+                 retract_seqno, INFINITY, 0,
+                 route->neigh, route->nexthop);
+
+    if(!babel_check(!route->installed && route->installed_table_count == 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on explicit_retraction_uninstalls_route_test.\n");
+        fprintf(stderr,
+                "Expected explicit retraction to uninstall route; installed=%d tables=%d.\n",
+                route->installed, route->installed_table_count);
+    }
+}
+
 void kernel_delete_babel_proto_flushes_matching_xroute_test(void)
 {
     struct interface *ifp;
@@ -1220,6 +1271,8 @@ void route_test_suite(void)
              "flush_xroute_reannounces_more_specific_test");
     run_route_test(kernel_delete_retracted_route_clears_installed_state_test,
                    "kernel_delete_retracted_route_clears_installed_state_test");
+    run_route_test(explicit_retraction_uninstalls_route_test,
+                   "explicit_retraction_uninstalls_route_test");
     run_test(kernel_delete_babel_proto_flushes_matching_xroute_test,
              "kernel_delete_babel_proto_flushes_matching_xroute_test");
     fprintf(stderr, "-----------------------------------------------\n");
