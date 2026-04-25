@@ -111,7 +111,8 @@ struct babel_route *update_route(const unsigned char *id,
                                  unsigned short seqno, unsigned short refmetric,
                                  unsigned short interval,
                                  struct neighbour *neigh,
-                                 const unsigned char *nexthop);
+                                 const unsigned char *nexthop,
+                                 int hard_retract);
 void retract_neighbour_routes(struct neighbour *neigh);
 void send_unfeasible_request(struct neighbour *neigh, int force,
                              unsigned short seqno, unsigned short metric,
@@ -122,4 +123,5 @@ void send_triggered_update(struct babel_route *route,
 void route_changed(struct babel_route *route,
                    struct source *oldsrc, unsigned short oldmetric);
 void route_lost(struct source *src, unsigned oldmetric);
+void route_lost_ext(struct source *src, unsigned oldmetric, int hard_retract);
 void expire_routes(void);

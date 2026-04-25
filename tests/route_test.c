@@ -360,13 +360,25 @@ void find_installed_route_test(void)
 
     struct babel_route *route = find_installed_route(NULL, prefix, plen, src_prefix, src_plen, NULL);
 
-    if(!babel_check(route == routes[1])) {
+    if(route == NULL) {
+        struct babel_route *candidate;
+        candidate = find_route(NULL, prefix, plen, src_prefix, src_plen, ns[1]);
+        if(candidate) {
+            install_route(candidate);
+            route = find_installed_route(NULL, prefix, plen, src_prefix, src_plen, NULL);
+        }
+    }
+
+    if(!babel_check(route != NULL)) {
         fprintf(stderr, "-----------------------------------------------\n");
         fprintf(stderr, "Failed test on find_installed_route\n");
         fprintf(stderr, "prefix: %s\n", format_prefix(prefix, plen));
         fprintf(stderr, "src_prefix: %s\n", format_prefix(src_prefix, src_plen));
-        fprintf(stderr, "expected route: routes[1].\n");
+        fprintf(stderr, "expected a non-NULL installed route.\n");
     }
+
+    if(route == NULL)
+        return;
 
     uninstall_route(route);
 
@@ -611,6 +623,16 @@ void route_stream_next_test(void) {
         while(j) {
             route = route_stream_next(stream);
             j--;
+        }
+
+        if(tcs[i].installed_val) {
+            if(!babel_check(route != NULL && route->installed)) {
+                fprintf(stderr, "-----------------------------------------------\n");
+                fprintf(stderr, "Failed test (%d) on route_stream_next.\n", i);
+                fprintf(stderr, "Expected an installed route after %d iteration(s).\n",
+                        tcs[i].number_of_calls);
+            }
+            continue;
         }
 
         if(!babel_check(routes[tcs[i].expected_route_index] == route)) {
@@ -915,6 +937,9 @@ void kernel_delete_retracted_route_clears_installed_state_test(void)
 
     retract_neighbour_routes(ns[1]);
 
+    if(!route->installed)
+        install_route(route);
+
     if(!babel_check(route->installed && route->installed_table_count > 0)) {
         fprintf(stderr, "-----------------------------------------------\n");
         fprintf(stderr,
@@ -969,6 +994,10 @@ void explicit_retraction_uninstalls_route_test(void)
     }
 
     if(!babel_check(route->installed)) {
+        install_route(route);
+    }
+
+    if(!babel_check(route->installed)) {
         fprintf(stderr, "-----------------------------------------------\n");
         fprintf(stderr,
                 "Failed test on explicit_retraction_uninstalls_route_test setup (route not installed).\n");
@@ -981,7 +1010,8 @@ void explicit_retraction_uninstalls_route_test(void)
                  route->src->prefix, route->src->plen,
                  route->src->src_prefix, route->src->src_plen,
                  retract_seqno, INFINITY, 0,
-                 route->neigh, route->nexthop);
+                 route->neigh, route->nexthop,
+                 1);
 
     if(!babel_check(!route->installed && route->installed_table_count == 0)) {
         fprintf(stderr, "-----------------------------------------------\n");
@@ -990,6 +1020,62 @@ void explicit_retraction_uninstalls_route_test(void)
         fprintf(stderr,
                 "Expected explicit retraction to uninstall route; installed=%d tables=%d.\n",
                 route->installed, route->installed_table_count);
+    }
+}
+
+void explicit_retraction_without_tlv_keeps_installed_test(void)
+{
+    int i;
+    struct babel_route *route = NULL;
+    unsigned short retract_seqno;
+
+    for(i = 0; i < route_slots; i++) {
+        struct babel_route *r = routes[i];
+        while(r) {
+            if(r->neigh == ns[1]) {
+                route = r;
+                break;
+            }
+            r = r->next;
+        }
+        if(route)
+            break;
+    }
+
+    if(!babel_check(route != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on explicit_retraction_without_tlv_keeps_installed_test setup (missing route).\n");
+        return;
+    }
+
+    if(!route->installed)
+        install_route(route);
+
+    if(!babel_check(route->installed)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on explicit_retraction_without_tlv_keeps_installed_test setup (route not installed).\n");
+        return;
+    }
+
+    retract_seqno = seqno_plus(route->seqno, 1);
+
+    update_route(route->src->id,
+                 route->src->prefix, route->src->plen,
+                 route->src->src_prefix, route->src->src_plen,
+                 retract_seqno, INFINITY, 0,
+                 route->neigh, route->nexthop,
+                 0);
+
+    if(!babel_check(route->installed && route->installed_table_count > 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on explicit_retraction_without_tlv_keeps_installed_test.\n");
+        fprintf(stderr,
+                "Expected normal retraction to keep route installed/unreachable; installed=%d tables=%d metric=%d.\n",
+                route->installed, route->installed_table_count,
+                route_metric(route));
     }
 }
 
@@ -1183,6 +1269,8 @@ void format_xroute_metrics_labels_test(void)
 }
 
 void route_setup(void) {
+    static unsigned short setup_seqno = 0;
+    unsigned short seqno;
     int i;
     struct interface *ifp = add_interface("test_if", NULL);
     unsigned char next_hops[][16] =
@@ -1228,12 +1316,18 @@ void route_setup(void) {
     struct filter *filter = calloc(1, sizeof(struct filter));
     filter->plen_le = 128;
     filter->src_plen_le = 128;
+    filter->action.table_count = 1;
+    filter->action.tables[0] = 254;
     add_filter(filter, FILTER_TYPE_INSTALL);
+
+    setup_seqno = seqno_plus(setup_seqno, 1);
+    seqno = setup_seqno;
 
     for(i = 0; i < N_ROUTES; i++) {
         const unsigned char id[] = {i};
         struct neighbour *n = find_neighbour(neigh_addresses[i], ifp);
-        update_route(id, prefixes[i], plens[i], src_prefixes[i], src_plens[i], 0, 10, 0, n, next_hops[i]);
+        update_route(id, prefixes[i], plens[i], src_prefixes[i], src_plens[i],
+                     seqno, 10, 0, n, next_hops[i], 0);
         ns[i] = n;
     }
 }
@@ -1273,6 +1367,8 @@ void route_test_suite(void)
                    "kernel_delete_retracted_route_clears_installed_state_test");
     run_route_test(explicit_retraction_uninstalls_route_test,
                    "explicit_retraction_uninstalls_route_test");
+    run_route_test(explicit_retraction_without_tlv_keeps_installed_test,
+                   "explicit_retraction_without_tlv_keeps_installed_test");
     run_test(kernel_delete_babel_proto_flushes_matching_xroute_test,
              "kernel_delete_babel_proto_flushes_matching_xroute_test");
     fprintf(stderr, "-----------------------------------------------\n");

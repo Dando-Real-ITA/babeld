@@ -37,6 +37,7 @@ struct resend {
     unsigned char src_plen;
     unsigned short seqno;
     unsigned char id[8];
+    unsigned char update_flags;
     struct interface *ifp;
     struct resend *next;
 };
@@ -47,6 +48,7 @@ void flush_resends(struct neighbour *neigh);
 int record_resend(int kind, const unsigned char *prefix, unsigned char plen,
                   const unsigned char *src_prefix, unsigned char src_plen,
                   unsigned short seqno, const unsigned char *id,
+                  unsigned char update_flags,
                   struct interface *ifp, int delay);
 int unsatisfied_request(const unsigned char *prefix, unsigned char plen,
                         const unsigned char *src_prefix, unsigned char src_plen,

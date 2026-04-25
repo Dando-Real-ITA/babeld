@@ -126,10 +126,14 @@ network_prefix(int ae, int plen, unsigned int omitted,
 static int
 parse_update_subtlv(struct interface *ifp, int metric, int ae,
                     const unsigned char *a, int alen,
-                    unsigned char *src_prefix, unsigned char *src_plen)
+                    unsigned char *src_prefix, unsigned char *src_plen,
+                    int *hard_withdraw)
 {
     int type, len, i = 0;
     int have_src_prefix = 0;
+
+    if(hard_withdraw)
+        *hard_withdraw = 0;
 
     while(i < alen) {
         type = a[i];
@@ -146,6 +150,13 @@ parse_update_subtlv(struct interface *ifp, int metric, int ae,
 
         if(type == SUBTLV_PADN) {
             /* Nothing. */
+        } else if(type == SUBTLV_HARD_WITHDRAW) {
+            if(len != 0)
+                goto fail;
+            if(metric < INFINITY)
+                goto fail;
+            if(hard_withdraw)
+                *hard_withdraw = 1;
         } else if(type == SUBTLV_SOURCE_PREFIX) {
             int rc;
             if(len < 1)
@@ -826,6 +837,7 @@ parse_packet(const unsigned char *from, struct interface *ifp,
             unsigned char prefix[16], src_prefix[16], *nh;
             unsigned char plen, src_plen;
             unsigned short interval, seqno, metric;
+            int hard_withdraw = 0;
             int rc, parsed_len, is_ss;
             if(len < 10) {
                 if(len < 2 || message[3] & 0x80)
@@ -934,7 +946,8 @@ parse_packet(const unsigned char *from, struct interface *ifp,
 
             rc = parse_update_subtlv(ifp, metric, message[2],
                                      message + 2 + parsed_len,
-                                     len - parsed_len, src_prefix, &src_plen);
+                                     len - parsed_len, src_prefix, &src_plen,
+                                     &hard_withdraw);
             if(rc < 0)
                 goto done;
 
@@ -964,7 +977,7 @@ parse_packet(const unsigned char *from, struct interface *ifp,
 
             update_route(have_router_id ? router_id : NULL,
                          prefix, plen, src_prefix, src_plen, seqno,
-                         metric, interval, neigh, nh);
+                         metric, interval, neigh, nh, hard_withdraw);
         } else if(type == MESSAGE_REQUEST) {
             unsigned char prefix[16], src_prefix[16], plen, src_plen;
             int rc, is_ss;
@@ -1462,7 +1475,8 @@ really_buffer_update(struct buffered *buf, struct interface *ifp,
                      const unsigned char *id,
                      const unsigned char *prefix, unsigned char plen,
                      const unsigned char *src_prefix, unsigned char src_plen,
-                     unsigned short seqno, unsigned short metric)
+                     unsigned short seqno, unsigned short metric,
+                     unsigned char update_flags)
 {
     int add_metric, v4, real_plen, real_src_plen;
     int ae, omit, spb, len;
@@ -1471,6 +1485,9 @@ really_buffer_update(struct buffered *buf, struct interface *ifp,
     int is_ss = !is_default(src_prefix, src_plen);
 
     if(!if_up(ifp))
+        return;
+
+    if(buf == NULL || buf->buf == NULL || buf->size <= 0)
         return;
 
     if(is_ss && (ifp->flags & IF_RFC6126) != 0)
@@ -1544,6 +1561,8 @@ really_buffer_update(struct buffered *buf, struct interface *ifp,
     spb = (real_src_plen + 7) / 8;
     if(is_ss)
         len += 3 + spb;
+    if(update_flags & UPDATE_FLAG_HARD_WITHDRAW)
+        len += 2;
 
     start_message(buf, ifp, MESSAGE_UPDATE, len);
     accumulate_byte(buf, ae);
@@ -1560,6 +1579,10 @@ really_buffer_update(struct buffered *buf, struct interface *ifp,
         accumulate_byte(buf, real_src_plen);
         accumulate_bytes(buf, real_src_prefix, spb);
     }
+    if(update_flags & UPDATE_FLAG_HARD_WITHDRAW) {
+        accumulate_byte(buf, SUBTLV_HARD_WITHDRAW);
+        accumulate_byte(buf, 0);
+    }
     end_message(buf, MESSAGE_UPDATE, len);
     if(flags & 0x80) {
         memcpy(buf->prefix, prefix, 16);
@@ -1571,7 +1594,8 @@ static void
 really_send_update(struct interface *ifp, const unsigned char *id,
                    const unsigned char *prefix, unsigned char plen,
                    const unsigned char *src_prefix, unsigned char src_plen,
-                   unsigned short seqno, unsigned short metric)
+                   unsigned short seqno, unsigned short metric,
+                   unsigned char update_flags)
 {
     if(!if_up(ifp))
         return;
@@ -1582,13 +1606,13 @@ really_send_update(struct interface *ifp, const unsigned char *id,
             if(neigh->ifp == ifp) {
                 really_buffer_update(&neigh->buf, ifp, id,
                                      prefix, plen, src_prefix, src_plen,
-                                     seqno, metric);
+                                     seqno, metric, update_flags);
             }
         }
     } else {
         really_buffer_update(&ifp->buf, ifp, id,
                              prefix, plen, src_prefix, src_plen,
-                             seqno, metric);
+                             seqno, metric, update_flags);
     }
 }
 
@@ -1710,7 +1734,7 @@ flushupdates(struct interface *ifp)
                 really_send_update(ifp, myid,
                                    xroute->prefix, xroute->plen,
                                    xroute->src_prefix, xroute->src_plen,
-                                   myseqno, xroute->metric);
+                                   myseqno, xroute->metric, 0);
                 last_prefix = xroute->prefix;
                 last_plen = xroute->plen;
                 last_src_prefix = xroute->src_prefix;
@@ -1737,7 +1761,7 @@ flushupdates(struct interface *ifp)
                                    route->src->prefix, route->src->plen,
                                    route->src->src_prefix,
                                    route->src->src_plen,
-                                   seqno, metric);
+                                   seqno, metric, 0);
                 update_source(route->src, seqno, metric);
                 last_prefix = route->src->prefix;
                 last_plen = route->src->plen;
@@ -1750,7 +1774,7 @@ flushupdates(struct interface *ifp)
                 really_send_update(ifp, myid,
                                    b[i].prefix, b[i].plen,
                                    b[i].src_prefix, b[i].src_plen,
-                                   myseqno, INFINITY);
+                                   myseqno, INFINITY, 0);
             }
         }
 
@@ -1928,7 +1952,60 @@ send_update_resend(struct interface *ifp,
 
     send_update(ifp, 1, prefix, plen, src_prefix, src_plen);
     record_resend(RESEND_UPDATE, prefix, plen, src_prefix, src_plen,
-                  0, NULL, NULL, resend_delay);
+                  0, NULL, 0, NULL, resend_delay);
+}
+
+void
+send_update_with_id(struct interface *ifp,
+                    const unsigned char *prefix, unsigned char plen,
+                    const unsigned char *src_prefix,
+                    unsigned char src_plen,
+                    unsigned short seqno,
+                    const unsigned char *id,
+                    unsigned char update_flags)
+{
+    if(ifp == NULL) {
+        struct interface *ifp_aux;
+        FOR_ALL_INTERFACES(ifp_aux) {
+            send_update_with_id(ifp_aux,
+                                prefix, plen,
+                                src_prefix, src_plen,
+                                seqno, id, update_flags);
+        }
+        return;
+    }
+
+    if(!if_up(ifp))
+        return;
+
+    really_send_update(ifp, id, prefix, plen, src_prefix, src_plen,
+                       seqno, INFINITY, update_flags);
+
+    if((ifp->flags & IF_UNICAST) != 0) {
+        struct neighbour *neigh;
+        FOR_ALL_NEIGHBOURS(neigh) {
+            if(neigh->ifp == ifp)
+                schedule_flush_now(&neigh->buf);
+        }
+    } else {
+        schedule_flush_now(&ifp->buf);
+    }
+}
+
+void
+send_update_resend_with_id(struct interface *ifp,
+                           const unsigned char *prefix, unsigned char plen,
+                           const unsigned char *src_prefix,
+                           unsigned char src_plen,
+                           unsigned short seqno,
+                           const unsigned char *id,
+                           unsigned char update_flags)
+{
+    send_update_with_id(ifp, prefix, plen, src_prefix, src_plen,
+                        seqno, id, update_flags);
+
+    record_resend(RESEND_UPDATE, prefix, plen, src_prefix, src_plen,
+                  seqno, id, update_flags, ifp, resend_delay);
 }
 
 void
@@ -2347,7 +2424,7 @@ send_request_resend(const unsigned char *prefix, unsigned char plen,
         send_unicast_multihop_request(neigh, prefix, plen, src_prefix, src_plen,
                                       seqno, id, 127);
         record_resend(RESEND_REQUEST, prefix, plen, src_prefix, src_plen, seqno,
-                      id, neigh->ifp, resend_delay);
+                      id, 0, neigh->ifp, resend_delay);
     } else {
         struct interface *ifp;
         FOR_ALL_INTERFACES(ifp) {
@@ -2428,5 +2505,6 @@ handle_request(struct neighbour *neigh, const unsigned char *prefix,
     send_unicast_multihop_request(successor, prefix, plen, src_prefix, src_plen,
                                 seqno, id, hop_count - 1);
     record_resend(RESEND_REQUEST, prefix, plen, src_prefix, src_plen, seqno, id,
+                0,
                 neigh->ifp, 0);
 }

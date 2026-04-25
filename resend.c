@@ -92,6 +92,7 @@ int
 record_resend(int kind, const unsigned char *prefix, unsigned char plen,
               const unsigned char *src_prefix, unsigned char src_plen,
               unsigned short seqno, const unsigned char *id,
+              unsigned char update_flags,
               struct interface *ifp, int delay)
 {
     struct resend *resend;
@@ -126,6 +127,7 @@ record_resend(int kind, const unsigned char *prefix, unsigned char plen,
         else
             memset(resend->id, 0, 8);
         resend->seqno = seqno;
+        resend->update_flags = update_flags;
         if(resend->ifp != ifp)
             resend->ifp = NULL;
     } else {
@@ -142,6 +144,7 @@ record_resend(int kind, const unsigned char *prefix, unsigned char plen,
         resend->seqno = seqno;
         if(id)
             memcpy(resend->id, id, 8);
+        resend->update_flags = update_flags;
         resend->ifp = ifp;
         resend->time = now;
         resend->next = to_resend;
@@ -297,6 +300,7 @@ void
 do_resend()
 {
     struct resend *resend;
+    static const unsigned char zero_id[8] = {0};
 
     resend = to_resend;
     while(resend) {
@@ -314,9 +318,21 @@ do_resend()
                                                     127);
                     break;
                 case RESEND_UPDATE:
-                    send_update(resend->ifp, 1,
-                                resend->prefix, resend->plen,
-                                resend->src_prefix, resend->src_plen);
+                    if(resend->update_flags != 0 ||
+                       memcmp(resend->id, zero_id, 8) != 0) {
+                        send_update_with_id(resend->ifp,
+                                            resend->prefix,
+                                            resend->plen,
+                                            resend->src_prefix,
+                                            resend->src_plen,
+                                            resend->seqno,
+                                            resend->id,
+                                            resend->update_flags);
+                    } else {
+                        send_update(resend->ifp, 1,
+                                    resend->prefix, resend->plen,
+                                    resend->src_prefix, resend->src_plen);
+                    }
                     break;
                 default: abort();
                 }

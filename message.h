@@ -45,7 +45,10 @@ THE SOFTWARE.
 #define SUBTLV_PADN 1
 #define SUBTLV_DIVERSITY 2       /* Also known as babelz. */
 #define SUBTLV_TIMESTAMP 3       /* Used to compute RTT. */
+#define SUBTLV_HARD_WITHDRAW 4   /* Explicit source withdrawal marker. */
 #define SUBTLV_SOURCE_PREFIX 128 /* Source-specific routing. */
+
+#define UPDATE_FLAG_HARD_WITHDRAW 0x01
 
 /* Address encodings */
 #define AE_WILDCARD 0
@@ -83,6 +86,20 @@ void send_update_resend(struct interface *ifp,
                         const unsigned char *prefix, unsigned char plen,
                         const unsigned char *src_prefix,
                         unsigned char src_plen);
+void send_update_resend_with_id(struct interface *ifp,
+                                const unsigned char *prefix, unsigned char plen,
+                                const unsigned char *src_prefix,
+                                unsigned char src_plen,
+                                unsigned short seqno,
+                                const unsigned char *id,
+                                unsigned char update_flags);
+void send_update_with_id(struct interface *ifp,
+                         const unsigned char *prefix, unsigned char plen,
+                         const unsigned char *src_prefix,
+                         unsigned char src_plen,
+                         unsigned short seqno,
+                         const unsigned char *id,
+                         unsigned char update_flags);
 void send_wildcard_retraction(struct interface *ifp);
 void send_self_update(struct interface *ifp);
 void send_ihu(struct neighbour *neigh, struct interface *ifp);

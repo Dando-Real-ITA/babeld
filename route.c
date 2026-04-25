@@ -962,7 +962,8 @@ update_route(const unsigned char *id,
              const unsigned char *src_prefix, unsigned char src_plen,
              unsigned short seqno, unsigned short refmetric,
              unsigned short interval,
-             struct neighbour *neigh, const unsigned char *nexthop)
+             struct neighbour *neigh, const unsigned char *nexthop,
+             int hard_retract)
 {
     struct babel_route *route;
     struct source *src;
@@ -1033,7 +1034,8 @@ update_route(const unsigned char *id,
         oldsrc = route->src;
         oldmetric = route_metric(route);
 
-        if(refmetric >= INFINITY && oldinstalled && src == route->src) {
+          if(refmetric >= INFINITY && hard_retract &&
+              oldinstalled && src == route->src) {
             route->seqno = seqno;
             route->hold_time = hold_time;
 
@@ -1043,7 +1045,7 @@ update_route(const unsigned char *id,
             if(route->installed)
                 uninstall_route(route);
 
-            route_lost(oldsrc, oldmetric);
+            route_lost_ext(oldsrc, oldmetric, 1);
             return route;
         }
 
@@ -1079,7 +1081,7 @@ update_route(const unsigned char *id,
                 find_installed_route(oldsrc->id, prefix, plen, src_prefix, src_plen, NULL) == NULL;
         }
         if(lost)
-            route_lost(oldsrc, oldmetric);
+            route_lost_ext(oldsrc, oldmetric, 0);
         else if(!feasible)
             send_unfeasible_request(neigh, route_old(route), seqno, metric, src);
         release_source(oldsrc);
@@ -1314,28 +1316,43 @@ route_changed(struct babel_route *route,
 
 /* We just lost the installed route to a given destination. */
 void
-route_lost(struct source *src, unsigned oldmetric)
+route_lost_ext(struct source *src, unsigned oldmetric, int hard_retract)
 {
     struct babel_route *new_route;
     new_route = find_best_route(src->id,
                                 src->prefix, src->plen,
                                 src->src_prefix, src->src_plen, 1, NULL);
-    if(new_route && route_feasible(new_route)) {
+    if(new_route && route_feasible(new_route) &&
+       (!hard_retract || route_metric(new_route) < INFINITY)) {
         consider_route(new_route);
     } else if(oldmetric < INFINITY) {
         /* Avoid creating a blackhole. */
-        send_update_resend(NULL, src->prefix, src->plen,
-                           src->src_prefix, src->src_plen);
+        if(hard_retract) {
+            send_update_resend_with_id(NULL,
+                                       src->prefix, src->plen,
+                                       src->src_prefix, src->src_plen,
+                                       src->seqno, src->id,
+                                       UPDATE_FLAG_HARD_WITHDRAW);
+        } else {
+            send_update_resend(NULL, src->prefix, src->plen,
+                               src->src_prefix, src->src_plen);
+        }
         /* If the route was usable enough, try to get an alternate one.
            If it was not, we could be dealing with oscillations around
            the value of INFINITY. */
-        if(oldmetric <= INFINITY / 2)
+        if(!hard_retract && oldmetric <= INFINITY / 2)
             send_request_resend(src->prefix, src->plen,
                                 src->src_prefix, src->src_plen,
                                 src->metric >= INFINITY ?
                                 src->seqno : seqno_plus(src->seqno, 1),
                                 src->id);
     }
+}
+
+void
+route_lost(struct source *src, unsigned oldmetric)
+{
+    route_lost_ext(src, oldmetric, 0);
 }
 
 /* This is called periodically to flush old routes.  It will also send

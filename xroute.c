@@ -314,8 +314,8 @@ add_xroute(unsigned char prefix[16], unsigned char plen,
     return 1;
 }
 
-void
-flush_xroute(struct xroute *xroute, int send_updates)
+static void
+flush_xroute_ext(struct xroute *xroute, int send_updates, int hard_withdraw)
 {
     int i;
     unsigned char prefix[16], plen;
@@ -361,10 +361,24 @@ flush_xroute(struct xroute *xroute, int send_updates)
             send_update(NULL, 0, prefix, plen, src_prefix, src_plen);
     } else {
         if(send_updates) {
-            send_update_resend(NULL, prefix, plen, src_prefix, src_plen);
+            if(hard_withdraw) {
+                send_update_resend_with_id(NULL,
+                                           prefix, plen,
+                                           src_prefix, src_plen,
+                                           myseqno, myid,
+                                           UPDATE_FLAG_HARD_WITHDRAW);
+            } else {
+                send_update_resend(NULL, prefix, plen, src_prefix, src_plen);
+            }
             send_covered_xroute_updates(prefix, plen, src_prefix, src_plen);
         }
     }
+}
+
+void
+flush_xroute(struct xroute *xroute, int send_updates)
+{
+    flush_xroute_ext(xroute, send_updates, 0);
 }
 
 /* Returns an overestimate of the number of xroutes. */
@@ -607,7 +621,7 @@ sync_deleted_babel_route(struct kernel_route *kroute)
             unsigned short oldmetric = route_metric(route);
             route->installed = 0;
             if(oldmetric < INFINITY)
-                route_lost(route->src, oldmetric);
+                route_lost_ext(route->src, oldmetric, 1);
         }
     } while(has_duplicate_default && is_default(kroute->prefix, kroute->plen));
 
@@ -670,7 +684,7 @@ kernel_route_notify(int add, struct kernel_route *kroute, void *closure)
             debugf("Deleting kernel route matched xroute table=%d (kernel table=%d) for %s\n",
                    xroutes[i].table, kroute->table,
                    format_prefix(kroute->prefix, kroute->plen));
-            flush_xroute(&xroutes[i], 1);
+            flush_xroute_ext(&xroutes[i], 1, 1);
         } else {
             debugf("Flushing unknown route.\n");
         }
@@ -864,7 +878,7 @@ check_xroutes(int send_updates, int warn, int check_infinity)
                             "Flushing spurious route to %s "
                             "(this shouldn't happen)\n",
                             format_prefix(xroutes[j].prefix, xroutes[j].plen));
-                flush_xroute(&xroutes[j], send_updates);
+                flush_xroute_ext(&xroutes[j], send_updates, 1);
                 made_changes = 1;
                 break;  /* Restart the pass */
             } else {
