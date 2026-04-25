@@ -94,6 +94,7 @@ extern int link_detect;
 extern int all_wireless;
 extern int has_ipv6_subtrees;
 extern int has_v4viav6;
+extern int enable_hard_withdraw;
 
 extern unsigned char myid[8];
 extern int have_id;

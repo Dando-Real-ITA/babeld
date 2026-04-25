@@ -264,6 +264,13 @@ This specifies whether to use carrier sense for determining interface
 availability, and is equivalent to the command-line option
 .BR \-l .
 .TP
+.BR hard-withdraw " {" true | false }
+Enable explicit hard-withdraw handling for route retractions.  When
+enabled, babeld may emit and honour hard-withdraw markers that force
+immediate source withdrawal propagation instead of normal unreachable
+hold-down behaviour.  The default is
+.BR false .
+.TP
 .BI smoothing-half-life " seconds"
 This specifies the half-life in seconds of the exponential decay used
 for smoothing metrics for performing route selection, and is
@@ -391,6 +398,10 @@ This defines the interval between full routing table dumps sent on this
 interface; since Babel uses triggered updates and doesn't count to
 infinity, this can be set to a fairly large value, unless significant
 packet loss is expected.  The default is four times the hello interval.
+This value is also advertised in Update messages and is used by peers
+to derive route hold times for entries learned from this router.
+Very large values may therefore significantly extend how long peers keep
+unreachable routes before flushing them.
 .TP
 .BR enable\-timestamps " {" true | false }
 Enable sending timestamps with each Hello and IHU message in order to

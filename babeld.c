@@ -64,6 +64,7 @@ int link_detect = 0;
 int all_wireless = 0;
 int has_ipv6_subtrees = 0;
 int has_v4viav6 = 0, safe_v4viav6 = 0;
+int enable_hard_withdraw = 0;
 int default_wireless_hello_interval = -1;
 int default_wired_hello_interval = -1;
 int resend_delay = -1;

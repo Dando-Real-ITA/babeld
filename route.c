@@ -972,6 +972,8 @@ update_route(const unsigned char *id,
     int hold_time = MAX((4 * interval) / 100 + interval / 50, 15);
     int is_v4;
 
+    hard_retract = hard_retract && enable_hard_withdraw;
+
     if(!id) {
         if(refmetric < INFINITY) {
             fprintf(stderr, "Update with no id and finite metric.");
@@ -1319,6 +1321,9 @@ void
 route_lost_ext(struct source *src, unsigned oldmetric, int hard_retract)
 {
     struct babel_route *new_route;
+
+    hard_retract = hard_retract && enable_hard_withdraw;
+
     new_route = find_best_route(src->id,
                                 src->prefix, src->plen,
                                 src->src_prefix, src->src_plen, 1, NULL);

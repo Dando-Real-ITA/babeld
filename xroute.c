@@ -318,9 +318,12 @@ static void
 flush_xroute_ext(struct xroute *xroute, int send_updates, int hard_withdraw)
 {
     int i;
+    int use_hard_withdraw;
     unsigned char prefix[16], plen;
     unsigned char src_prefix[16], src_plen;
     struct babel_route *route;
+
+    use_hard_withdraw = hard_withdraw && enable_hard_withdraw;
 
     /* We'll use these after we free the xroute */
     memcpy(prefix, xroute->prefix, 16);
@@ -361,7 +364,7 @@ flush_xroute_ext(struct xroute *xroute, int send_updates, int hard_withdraw)
             send_update(NULL, 0, prefix, plen, src_prefix, src_plen);
     } else {
         if(send_updates) {
-            if(hard_withdraw) {
+            if(use_hard_withdraw) {
                 send_update_resend_with_id(NULL,
                                            prefix, plen,
                                            src_prefix, src_plen,

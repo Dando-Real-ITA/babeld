@@ -972,6 +972,10 @@ void explicit_retraction_uninstalls_route_test(void)
     int i;
     struct babel_route *route = NULL;
     unsigned short retract_seqno;
+    int old_enable_hard_withdraw;
+
+    old_enable_hard_withdraw = enable_hard_withdraw;
+    enable_hard_withdraw = 1;
 
     for(i = 0; i < route_slots; i++) {
         struct babel_route *r = routes[i];
@@ -987,6 +991,7 @@ void explicit_retraction_uninstalls_route_test(void)
     }
 
     if(!babel_check(route != NULL)) {
+        enable_hard_withdraw = old_enable_hard_withdraw;
         fprintf(stderr, "-----------------------------------------------\n");
         fprintf(stderr,
                 "Failed test on explicit_retraction_uninstalls_route_test setup (missing route).\n");
@@ -998,6 +1003,7 @@ void explicit_retraction_uninstalls_route_test(void)
     }
 
     if(!babel_check(route->installed)) {
+        enable_hard_withdraw = old_enable_hard_withdraw;
         fprintf(stderr, "-----------------------------------------------\n");
         fprintf(stderr,
                 "Failed test on explicit_retraction_uninstalls_route_test setup (route not installed).\n");
@@ -1021,6 +1027,8 @@ void explicit_retraction_uninstalls_route_test(void)
                 "Expected explicit retraction to uninstall route; installed=%d tables=%d.\n",
                 route->installed, route->installed_table_count);
     }
+
+    enable_hard_withdraw = old_enable_hard_withdraw;
 }
 
 void explicit_retraction_without_tlv_keeps_installed_test(void)
@@ -1028,6 +1036,10 @@ void explicit_retraction_without_tlv_keeps_installed_test(void)
     int i;
     struct babel_route *route = NULL;
     unsigned short retract_seqno;
+    int old_enable_hard_withdraw;
+
+    old_enable_hard_withdraw = enable_hard_withdraw;
+    enable_hard_withdraw = 1;
 
     for(i = 0; i < route_slots; i++) {
         struct babel_route *r = routes[i];
@@ -1043,6 +1055,7 @@ void explicit_retraction_without_tlv_keeps_installed_test(void)
     }
 
     if(!babel_check(route != NULL)) {
+        enable_hard_withdraw = old_enable_hard_withdraw;
         fprintf(stderr, "-----------------------------------------------\n");
         fprintf(stderr,
                 "Failed test on explicit_retraction_without_tlv_keeps_installed_test setup (missing route).\n");
@@ -1053,6 +1066,7 @@ void explicit_retraction_without_tlv_keeps_installed_test(void)
         install_route(route);
 
     if(!babel_check(route->installed)) {
+        enable_hard_withdraw = old_enable_hard_withdraw;
         fprintf(stderr, "-----------------------------------------------\n");
         fprintf(stderr,
                 "Failed test on explicit_retraction_without_tlv_keeps_installed_test setup (route not installed).\n");
@@ -1077,6 +1091,8 @@ void explicit_retraction_without_tlv_keeps_installed_test(void)
                 route->installed, route->installed_table_count,
                 route_metric(route));
     }
+
+    enable_hard_withdraw = old_enable_hard_withdraw;
 }
 
 void kernel_delete_babel_proto_flushes_matching_xroute_test(void)

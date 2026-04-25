@@ -951,6 +951,9 @@ parse_packet(const unsigned char *from, struct interface *ifp,
             if(rc < 0)
                 goto done;
 
+            if(!enable_hard_withdraw)
+                hard_withdraw = 0;
+
             if(message[2] == AE_WILDCARD) {
                 if(metric < 0xFFFF) {
                     fprintf(stderr,
@@ -1489,6 +1492,9 @@ really_buffer_update(struct buffered *buf, struct interface *ifp,
 
     if(buf == NULL || buf->buf == NULL || buf->size <= 0)
         return;
+
+    if(!enable_hard_withdraw)
+        update_flags &= ~UPDATE_FLAG_HARD_WITHDRAW;
 
     if(is_ss && (ifp->flags & IF_RFC6126) != 0)
         return;

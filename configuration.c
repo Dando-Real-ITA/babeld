@@ -1046,6 +1046,7 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
               strcmp(token, "random-id") == 0 ||
               strcmp(token, "daemonise") == 0 ||
               strcmp(token, "skip-kernel-setup") == 0 ||
+              strcmp(token, "hard-withdraw") == 0 ||
               strcmp(token, "ipv6-subtrees") == 0 ||
               strcmp(token, "duplicate_default") == 0 ||
               strcmp(token, "reflect-kernel-metric") == 0) {
@@ -1062,6 +1063,8 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
             do_daemonise = b;
         else if(strcmp(token, "skip-kernel-setup") == 0)
             skip_kernel_setup = b;
+        else if(strcmp(token, "hard-withdraw") == 0)
+            enable_hard_withdraw = b;
         else if(strcmp(token, "ipv6-subtrees") == 0)
             has_ipv6_subtrees = b;
         else if(strcmp(token, "duplicate_default") == 0)
