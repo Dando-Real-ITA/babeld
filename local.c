@@ -375,7 +375,7 @@ local_notify_status_1(struct local_socket *s, int kind)
     int rc;
     time_t when;
 
-    when = now.tv_sec > 0 ? now.tv_sec : time(NULL);
+    when = time(NULL);
 
     rc = snprintf(buf, sizeof(buf),
                   "%s daemon version %s my-id %s my-seqno %u at %s\n",

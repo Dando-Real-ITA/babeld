@@ -1154,7 +1154,7 @@ dump_tables(FILE *out)
 
     fprintf(out, "\n");
 
-    when = now.tv_sec > 0 ? now.tv_sec : time(NULL);
+    when = time(NULL);
 
     fprintf(out, "Daemon version %s\n", BABELD_VERSION);
     fprintf(out, "My id %s seqno %d at %s\n",
