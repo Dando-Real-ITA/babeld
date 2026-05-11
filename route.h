@@ -36,16 +36,21 @@ struct babel_route {
     unsigned short hold_time;    /* in seconds */
     unsigned short smoothed_metric; /* for route selection */
     time_t smoothed_metric_time;
-    short installed;
+    short installed; /* 0: not installed, 1: primary installed, >1: ECMP nexthop rank */
     int installed_tables[MAX_TABLES_PER_FILTER];  /* Array of kernel routing tables */
     int installed_table_count;                     /* Number of tables route is installed in */
     struct babel_route *next;
 };
 
+#ifndef MAX_ECMP_NEXTHOPS
+#define MAX_ECMP_NEXTHOPS 32
+#endif
+
 struct route_stream;
 
 extern struct babel_route **routes;
 extern int kernel_metric, allow_duplicates, reflect_kernel_metric, has_duplicate_default;
+extern int multipath_ecmp;
 extern int route_slots;
 extern int smoothing_half_life;
 extern int two_to_the_one_over_hl; /* 2^(1/hl) * 0x10000 */
@@ -95,6 +100,7 @@ int update_feasible(struct source *src,
                     unsigned short seqno, unsigned short refmetric);
 void change_smoothing_half_life(int half_life);
 int route_smoothed_metric(struct babel_route *route);
+int route_ecmp_weight(struct babel_route *route);
 struct babel_route *find_best_route(const unsigned char *id,
                                     const unsigned char *prefix,
                                     unsigned char plen,
