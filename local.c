@@ -312,8 +312,9 @@ local_notify_xroute(struct xroute *xroute, int kind)
 static void
 local_notify_route_1(struct local_socket *s, struct babel_route *route, int kind)
 {
-    char buf[512], tables_buf[384];
+    char buf[640], tables_buf[384], weight_buf[32];
     int rc, i;
+    int weight;
     const char *dst_prefix = format_prefix(route->src->prefix,
                                            route->src->plen);
     const char *src_prefix = format_prefix(route->src->src_prefix,
@@ -332,9 +333,15 @@ local_notify_route_1(struct local_socket *s, struct babel_route *route, int kind
         }
     }
 
-    rc = snprintf(buf, 512,
+    weight = route_ecmp_weight(route);
+    if(weight > 0)
+        snprintf(weight_buf, sizeof(weight_buf), "%d", weight);
+    else
+        snprintf(weight_buf, sizeof(weight_buf), "-");
+
+    rc = snprintf(buf, sizeof(buf),
                   "%s route %lx prefix %s from %s installed %s tables %s "
-                  "id %s metric %d refmetric %d via %s if %s\n",
+                  "id %s metric %d refmetric %d installed_rank %d weight %s via %s if %s\n",
                   local_kind(kind),
                   (unsigned long)route,
                   dst_prefix, src_prefix,
@@ -342,10 +349,12 @@ local_notify_route_1(struct local_socket *s, struct babel_route *route, int kind
                   tables_buf,
                   format_eui64(route->src->id),
                   route_metric(route), route->refmetric,
+                  route->installed,
+                  weight_buf,
                   format_address(route->neigh->address),
                   route->neigh->ifp->name);
 
-    if(rc < 0 || rc >= 512)
+    if(rc < 0 || rc >= (int)sizeof(buf))
         goto fail;
 
     rc = write_timeout(s->fd, buf, rc);
@@ -440,7 +449,7 @@ local_notify_all_1(struct local_socket *s)
                 break;
             local_count_dump_route(&route_counters,
                                    route->src->prefix, route->src->plen,
-                                   route->installed);
+                                   route->installed == 1);
             local_notify_route_1(s, route, LOCAL_ADD);
         }
         route_stream_done(routes);
