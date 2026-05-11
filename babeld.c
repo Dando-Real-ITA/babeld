@@ -1080,6 +1080,8 @@ dump_route(FILE *out, struct babel_route *route)
         memcmp(route->nexthop, route->neigh->address, 16) == 0 ?
         NULL : route->nexthop;
     char tables_buf[384];
+    char weight_buf[32];
+    int weight;
     int i, written = 0;
 
     /* Build tables string from array */
@@ -1094,8 +1096,14 @@ dump_route(FILE *out, struct babel_route *route)
         }
     }
 
+    weight = route_ecmp_weight(route);
+    if(weight > 0)
+        snprintf(weight_buf, sizeof(weight_buf), "%d", weight);
+    else
+        snprintf(weight_buf, sizeof(weight_buf), "-");
+
     fprintf(out, "%s from %s metric %d (%d) refmetric %d id %s "
-            "seqno %d age %d via %s neigh %s%s%s%s tables %s\n",
+            "seqno %d age %d via %s neigh %s%s%s%s tables %s installed-rank %d weight %s\n",
             format_prefix(route->src->prefix, route->src->plen),
             format_prefix(route->src->src_prefix, route->src->src_plen),
             route_metric(route), route_smoothed_metric(route), route->refmetric,
@@ -1108,7 +1116,9 @@ dump_route(FILE *out, struct babel_route *route)
             nexthop ? format_address(nexthop) : "",
             route->installed ? " (installed)" :
             route_feasible(route) ? " (feasible)" : "",
-            tables_buf);
+            tables_buf,
+            route->installed,
+            weight_buf);
 }
 
 static void
@@ -1197,7 +1207,7 @@ dump_tables(FILE *out)
             if(route == NULL) break;
             count_dump_route(&route_counters,
                      route->src->prefix, route->src->plen,
-                     route->installed);
+                     route->installed == 1);
             dump_route(out, route);
         }
         route_stream_done(routes);

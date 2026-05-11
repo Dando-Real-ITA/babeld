@@ -271,6 +271,12 @@ immediate source withdrawal propagation instead of normal unreachable
 hold-down behaviour.  The default is
 .BR false .
 .TP
+.BR ecmp " {" true | false }
+Enable multipath route installation in the kernel when multiple feasible
+routes exist for the same destination.  Babel route propagation is
+independent from this setting.  The default is
+.BR false .
+.TP
 .BI smoothing-half-life " seconds"
 This specifies the half-life in seconds of the exponential decay used
 for smoothing metrics for performing route selection, and is

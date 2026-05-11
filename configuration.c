@@ -1048,6 +1048,7 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
               strcmp(token, "skip-kernel-setup") == 0 ||
               strcmp(token, "hard-withdraw") == 0 ||
               strcmp(token, "ipv6-subtrees") == 0 ||
+              strcmp(token, "ecmp") == 0 ||
               strcmp(token, "duplicate_default") == 0 ||
               strcmp(token, "reflect-kernel-metric") == 0) {
         int b;
@@ -1067,6 +1068,8 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
             enable_hard_withdraw = b;
         else if(strcmp(token, "ipv6-subtrees") == 0)
             has_ipv6_subtrees = b;
+        else if(strcmp(token, "ecmp") == 0)
+            multipath_ecmp = b;
         else if(strcmp(token, "duplicate_default") == 0)
             has_duplicate_default = b;
         else if(strcmp(token, "reflect-kernel-metric") == 0)

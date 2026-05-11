@@ -743,6 +743,34 @@ kernel_routes(struct kernel_filter *filter) {
 
 }
 
+int
+kernel_route_multipath(int operation, int table,
+                       const unsigned char *dest, unsigned short plen,
+                       const unsigned char *src, unsigned short src_plen,
+                       const unsigned char *pref_src,
+                       unsigned int metric,
+                       unsigned int newmetric,
+                       const struct kernel_nexthop *nexthops,
+                       int nexthop_count,
+                       int newtable,
+                       const unsigned char *newpref_src)
+{
+    if(nexthop_count <= 1 && nexthops != NULL) {
+        const struct kernel_nexthop *nh = &nexthops[0];
+        return kernel_route(operation, table,
+                            dest, plen,
+                            src, src_plen,
+                            pref_src,
+                            nh->gate, nh->ifindex, metric,
+                            nh->gate, nh->ifindex,
+                            operation == ROUTE_MODIFY ? newmetric : metric,
+                            newtable, newpref_src);
+    }
+
+    errno = ENOSYS;
+    return -1;
+}
+
 static int
 socket_read(int sock, struct kernel_filter *filter)
 {
