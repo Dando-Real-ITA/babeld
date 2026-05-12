@@ -40,17 +40,30 @@ struct babel_route {
     int installed_tables[MAX_TABLES_PER_FILTER];  /* Array of kernel routing tables */
     int installed_table_count;                     /* Number of tables route is installed in */
     struct babel_route *next;
+    struct babel_route *multipath;
 };
 
 #ifndef MAX_ECMP_NEXTHOPS
 #define MAX_ECMP_NEXTHOPS 32
 #endif
 
+#ifndef DEFAULT_ECMP_METRIC_WINDOW
+#define DEFAULT_ECMP_METRIC_WINDOW 200
+#endif
+
+/* multipath_ecmp values */
+#define ECMP_DISABLED 0  /* no multipath */
+#define ECMP_EQUAL    1  /* equal-cost multipath, uniform weights;
+                            kernel only updated on nexthop-set changes or retractions */
+#define ECMP_WEIGHT   2  /* metric-proportional weights;
+                            kernel updated on all metric changes */
+
 struct route_stream;
 
 extern struct babel_route **routes;
 extern int kernel_metric, allow_duplicates, reflect_kernel_metric, has_duplicate_default;
 extern int multipath_ecmp;
+extern int ecmp_metric_window;
 extern int route_slots;
 extern int smoothing_half_life;
 extern int two_to_the_one_over_hl; /* 2^(1/hl) * 0x10000 */
@@ -91,10 +104,16 @@ void route_stream_done(struct route_stream *stream);
 int metric_to_kernel(int metric);
 void install_route(struct babel_route *route);
 void uninstall_route(struct babel_route *route);
+int change_route(int operation, const struct babel_route *route, int metric,
+                 const unsigned char *new_next_hop,
+                 int new_ifindex, int newmetric,
+                 const struct source *newsrc,
+                 int *installed_tables, int *installed_table_count);
 void change_route_metric(struct babel_route *route,
                          unsigned refmetric,
                          unsigned cost,
                          unsigned add);
+void refresh_installed_ranks(struct babel_route *route);
 int route_feasible(struct babel_route *route);
 int update_feasible(struct source *src,
                     unsigned short seqno, unsigned short refmetric);
