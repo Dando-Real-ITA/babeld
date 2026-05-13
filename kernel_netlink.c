@@ -1282,6 +1282,201 @@ kernel_route(int operation, int table,
     return netlink_talk(&buf.nh);
 }
 
+int
+kernel_route_multipath(int operation, int table,
+                       const unsigned char *dest, unsigned short plen,
+                       const unsigned char *src, unsigned short src_plen,
+                       const unsigned char *pref_src,
+                       unsigned int metric,
+                       unsigned int newmetric,
+                       const struct kernel_nexthop *nexthops,
+                       int nexthop_count,
+                       int newtable,
+                       const unsigned char *newpref_src)
+{
+    union { char raw[4096]; struct nlmsghdr nh; } buf;
+    struct rtmsg *rtm;
+    struct rtattr *rta;
+    int len = sizeof(buf.raw);
+    int rc, i, ipv4, use_src = 0;
+    unsigned char gate[16];
+    int ifindex;
+
+    if(nexthop_count <= 0 || nexthops == NULL) {
+        memcpy(gate, zeroes, 16);
+        ifindex = 0;
+    } else {
+        memcpy(gate, nexthops[0].gate, 16);
+        ifindex = nexthops[0].ifindex;
+    }
+
+    if(nexthop_count <= 1) {
+        return kernel_route(operation, table,
+                            dest, plen,
+                            src, src_plen,
+                            pref_src,
+                            gate, ifindex, metric,
+                            gate, ifindex,
+                            operation == ROUTE_MODIFY ? newmetric : metric,
+                            newtable, newpref_src);
+    }
+
+    if(operation == ROUTE_MODIFY) {
+        kernel_route_multipath(ROUTE_FLUSH, table,
+                               dest, plen,
+                               src, src_plen,
+                               pref_src,
+                               metric, metric,
+                               nexthops, nexthop_count,
+                               0, NULL);
+        return kernel_route_multipath(ROUTE_ADD, newtable,
+                                      dest, plen,
+                                      src, src_plen,
+                                      newpref_src,
+                                      newmetric, newmetric,
+                                      nexthops, nexthop_count,
+                                      0, NULL);
+    }
+
+    if(operation == ROUTE_FLUSH) {
+        return kernel_route(operation, table,
+                            dest, plen,
+                            src, src_plen,
+                            pref_src,
+                            gate, ifindex, metric,
+                            NULL, 0, 0,
+                            0, NULL);
+    }
+
+    if(!nl_setup) {
+        fprintf(stderr, "kernel_route_multipath: netlink not initialized.\n");
+        errno = EIO;
+        return -1;
+    }
+
+    if(nl_command.sock < 0) {
+        rc = netlink_socket(&nl_command, 0);
+        if(rc < 0) {
+            int olderrno = errno;
+            perror("kernel_route_multipath: netlink_socket()");
+            errno = olderrno;
+            return -1;
+        }
+    }
+
+    ipv4 = v4mapped(dest);
+    if(ipv4) {
+        errno = ENOSYS;
+        return -1;
+    }
+
+    use_src = !is_default(src, src_plen);
+    if(use_src && !has_ipv6_subtrees) {
+        errno = ENOSYS;
+        return -1;
+    }
+
+    for(i = 0; i < nexthop_count; i++) {
+        if(v4mapped(nexthops[i].gate)) {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+
+    memset(&buf, 0, sizeof(buf));
+    buf.nh.nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_REPLACE;
+    buf.nh.nlmsg_type = RTM_NEWROUTE;
+
+    rtm = NLMSG_DATA(&buf.nh);
+    rtm->rtm_family = AF_INET6;
+    rtm->rtm_dst_len = plen;
+    if(use_src)
+        rtm->rtm_src_len = src_plen;
+    rtm->rtm_table = table < 256 ? table : RT_TABLE_UNSPEC;
+    rtm->rtm_scope = RT_SCOPE_UNIVERSE;
+    rtm->rtm_type = RTN_UNICAST;
+    rtm->rtm_protocol = RTPROT_BABEL;
+
+    rta = RTM_RTA(rtm);
+
+    if(table >= 256) {
+        rta = RTA_NEXT(rta, len);
+        rta->rta_len = RTA_LENGTH(sizeof(int));
+        rta->rta_type = RTA_TABLE;
+        *(int*)RTA_DATA(rta) = table;
+    }
+
+    rta = RTA_NEXT(rta, len);
+    rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr));
+    rta->rta_type = RTA_DST;
+    memcpy(RTA_DATA(rta), dest, sizeof(struct in6_addr));
+
+    if(use_src) {
+        rta = RTA_NEXT(rta, len);
+        rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr));
+        rta->rta_type = RTA_SRC;
+        memcpy(RTA_DATA(rta), src, sizeof(struct in6_addr));
+    }
+
+    rta = RTA_NEXT(rta, len);
+    rta->rta_len = RTA_LENGTH(sizeof(int));
+    rta->rta_type = RTA_PRIORITY;
+    *(int*)RTA_DATA(rta) = metric;
+
+    if(pref_src) {
+        rta = RTA_NEXT(rta, len);
+        rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr));
+        rta->rta_type = RTA_PREFSRC;
+        memcpy(RTA_DATA(rta), pref_src, sizeof(struct in6_addr));
+    }
+
+    {
+        int mp_len = 0;
+        char *mp_data;
+        struct rtattr *mp;
+
+        rta = RTA_NEXT(rta, len);
+        mp = rta;
+        mp->rta_type = RTA_MULTIPATH;
+        mp->rta_len = RTA_LENGTH(0);
+        mp_data = (char*)RTA_DATA(mp);
+
+        for(i = 0; i < nexthop_count; i++) {
+            struct rtnexthop *rtnh;
+            struct rtattr *gw;
+            int weight;
+            int nh_len;
+
+            rtnh = (struct rtnexthop*)(mp_data + mp_len);
+            memset(rtnh, 0, sizeof(*rtnh));
+            rtnh->rtnh_ifindex = nexthops[i].ifindex;
+            rtnh->rtnh_flags = RTNH_F_ONLINK;
+
+            weight = nexthops[i].weight;
+            if(weight < 1)
+                weight = 1;
+            if(weight > 256)
+                weight = 256;
+            rtnh->rtnh_hops = weight - 1;
+
+            gw = (struct rtattr*)RTNH_DATA(rtnh);
+            gw->rta_type = RTA_GATEWAY;
+            gw->rta_len = RTA_LENGTH(sizeof(struct in6_addr));
+            memcpy(RTA_DATA(gw), nexthops[i].gate, sizeof(struct in6_addr));
+
+            nh_len = sizeof(*rtnh) + RTA_ALIGN(gw->rta_len);
+            rtnh->rtnh_len = nh_len;
+
+            mp_len += RTNH_ALIGN(nh_len);
+        }
+
+        mp->rta_len = RTA_LENGTH(mp_len);
+        buf.nh.nlmsg_len = ((char*)mp - buf.raw) + RTA_ALIGN(mp->rta_len);
+    }
+
+    return netlink_talk(&buf.nh);
+}
+
 static int
 parse_kernel_route_rta(struct rtmsg *rtm, int len, struct kernel_route *route)
 {
