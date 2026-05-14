@@ -1089,6 +1089,12 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
             goto error;
         }
         free(val);
+    } else if(strcmp(token, "ecmp-metric-window") == 0) {
+        int window;
+        c = getint(c, &window, gnc, closure);
+        if(c < -1 || window < 0 || window > 65535)
+            goto error;
+        ecmp_metric_window = window;
     } else if(strcmp(token, "protocol-group") == 0) {
         unsigned char *group = NULL;
         c = getip(c, &group, NULL, gnc, closure);
