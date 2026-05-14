@@ -47,7 +47,7 @@ int kernel_metric = 0, reflect_kernel_metric = 0;
 int allow_duplicates = -1;
 int has_duplicate_default = 0;
 int multipath_ecmp = 0;
-int diversity_factor = 256;     /* in units of 1/256 */
+int ecmp_metric_window = DEFAULT_ECMP_METRIC_WINDOW;
 
 int smoothing_half_life = 0;
 int two_to_the_one_over_hl = 0; /* 2^(1/hl) * 0x10000 */
@@ -154,18 +154,138 @@ find_route(const unsigned char *id,
            const unsigned char *src_prefix, unsigned char src_plen,
            struct neighbour *neigh)
 {
+    struct babel_route *head;
     struct babel_route *route;
     int i = find_route_slot(id, prefix, plen, src_prefix, src_plen, NULL);
 
     if(i < 0)
         return NULL;
 
-    route = routes[i];
+    head = routes[i];
+    while(head) {
+        route = head;
+        while(route) {
+            if(route->neigh == neigh)
+                return route;
+            route = route->multipath;
+        }
+        head = head->next;
+    }
 
-    while(route) {
-        if(route->neigh == neigh)
-            return route;
-        route = route->next;
+    return NULL;
+}
+
+static int
+route_metric_distance(const struct babel_route *a, const struct babel_route *b)
+{
+    int am = route_metric(a);
+    int bm = route_metric(b);
+    int d;
+
+    if(am >= INFINITY || bm >= INFINITY)
+        return INFINITY;
+
+    d = am - bm;
+    if(d < 0)
+        d = -d;
+    return d;
+}
+
+static int
+route_metric_le(const struct babel_route *a, const struct babel_route *b)
+{
+    return route_metric(a) <= route_metric(b);
+}
+
+static struct babel_route *
+find_compatible_group_head(struct babel_route *head,
+                           const struct babel_route *route,
+                           struct babel_route **prev_return)
+{
+    struct babel_route *prev = NULL;
+
+    while(head) {
+        if(route_metric_distance(head, route) <= ecmp_metric_window) {
+            if(prev_return)
+                *prev_return = prev;
+            return head;
+        }
+        prev = head;
+        head = head->next;
+    }
+
+    if(prev_return)
+        *prev_return = NULL;
+    return NULL;
+}
+
+static void
+insert_multipath_member_sorted(struct babel_route *head,
+                               struct babel_route *route)
+{
+    struct babel_route *prev = head;
+    struct babel_route *cur = head->multipath;
+
+    while(cur && route_metric_le(cur, route)) {
+        prev = cur;
+        cur = cur->multipath;
+    }
+
+    prev->multipath = route;
+    route->multipath = cur;
+    route->next = NULL;
+}
+
+static void
+insert_group_head_sorted(int slot, struct babel_route *route)
+{
+    struct babel_route *prev = NULL;
+    struct babel_route *cur = routes[slot];
+
+    while(cur && route_metric_le(cur, route)) {
+        prev = cur;
+        cur = cur->next;
+    }
+
+    route->next = cur;
+    route->multipath = NULL;
+    if(prev)
+        prev->next = route;
+    else
+        routes[slot] = route;
+}
+
+static struct babel_route *
+find_group_head_for_route(int slot,
+                          const struct babel_route *route,
+                          struct babel_route **prev_head_return,
+                          struct babel_route **prev_mp_return)
+{
+    struct babel_route *prev_head = NULL;
+    struct babel_route *head;
+
+    if(slot < 0 || slot >= route_slots)
+        return NULL;
+
+    head = routes[slot];
+    while(head) {
+        struct babel_route *prev_mp = NULL;
+        struct babel_route *r = head;
+
+        while(r) {
+            if(r == route) {
+                if(prev_head_return)
+                    *prev_head_return = prev_head;
+                if(prev_mp_return)
+                    *prev_mp_return = prev_mp;
+                return head;
+            }
+            prev_mp = r;
+            r = r->multipath;
+        }
+
+        prev_head = head;
+        head = head->next;
     }
 
     return NULL;
@@ -204,7 +324,7 @@ find_installed_route(const unsigned char *id,
             /* Valid index, match parameters */
             while (*index < route_slots && route_compare(NULL, prefix, plen, src_prefix, src_plen, routes[*index]) == 0) {
                 /* The route is valid and installed */
-                if (routes[*index]->installed)
+                if (routes[*index]->installed == 1)
                     return routes[(*index)++];
                 (*index)++;
             }
@@ -215,8 +335,18 @@ find_installed_route(const unsigned char *id,
 
     i = find_route_slot(id, prefix, plen, src_prefix, src_plen, NULL);
 
-    if(i >= 0 && routes[i]->installed)
-        return routes[i];
+    if(i >= 0) {
+        struct babel_route *head = routes[i];
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(r->installed == 1 && (!id || memcmp(r->src->id, id, 8) == 0))
+                    return r;
+                r = r->multipath;
+            }
+            head = head->next;
+        }
+    }
 
     return NULL;
 }
@@ -267,18 +397,41 @@ insert_route(struct babel_route *route)
         if(route_slots >= max_route_slots)
             return NULL;
         route->next = NULL;
+        route->multipath = NULL;
         if(n < route_slots)
             memmove(routes + n + 1, routes + n,
                     (route_slots - n) * sizeof(struct babel_route*));
         route_slots++;
         routes[n] = route;
-    } else {
+    } else if(multipath_ecmp == ECMP_DISABLED) {
         struct babel_route *r;
         r = routes[i];
         while(r->next)
             r = r->next;
         r->next = route;
         route->next = NULL;
+        route->multipath = NULL;
+    } else {
+        struct babel_route *prev_group = NULL;
+        struct babel_route *group_head =
+            find_compatible_group_head(routes[i], route, &prev_group);
+
+        if(group_head == NULL) {
+            insert_group_head_sorted(i, route);
+        } else if(route_metric(route) < route_metric(group_head)) {
+            struct babel_route *head_next = group_head->next;
+
+            if(prev_group)
+                prev_group->next = route;
+            else
+                routes[i] = route;
+
+            route->next = head_next;
+            route->multipath = group_head;
+            group_head->next = NULL;
+        } else {
+            insert_multipath_member_sorted(group_head, route);
+        }
     }
 
     return route;
