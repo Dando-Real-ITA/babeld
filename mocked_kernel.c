@@ -29,6 +29,11 @@ THE SOFTWARE.
 #include <unistd.h>
 
 int export_table = -1, import_table_count = 0, import_tables[MAX_IMPORT_TABLES];
+int mocked_kernel_route_calls = 0;
+int mocked_kernel_multipath_calls = 0;
+int mocked_kernel_last_multipath_count = 0;
+int mocked_kernel_last_operation = -1;
+int mocked_kernel_last_new_metric = -1;
 
 int
 if_eui64(char *ifname, int ifindex, unsigned char *eui)
@@ -94,6 +99,27 @@ kernel_route(int operation, int table,
              unsigned int newmetric, int newtable,
              const unsigned char *newpref_src)
 {
+    mocked_kernel_route_calls++;
+    mocked_kernel_last_operation = operation;
+    return 0;
+}
+
+int
+kernel_route_multipath(int operation, int table,
+                       const unsigned char *dest, unsigned short plen,
+                       const unsigned char *src, unsigned short src_plen,
+                       const unsigned char *pref_src,
+                       unsigned int metric,
+                       unsigned int newmetric,
+                       const struct kernel_nexthop *nexthops,
+                       int nexthop_count,
+                       int newtable,
+                       const unsigned char *newpref_src)
+{
+    mocked_kernel_multipath_calls++;
+    mocked_kernel_last_multipath_count = nexthop_count;
+    mocked_kernel_last_operation = operation;
+    mocked_kernel_last_new_metric = (int)newmetric;
     return 0;
 }
 

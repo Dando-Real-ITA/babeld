@@ -44,6 +44,12 @@ THE SOFTWARE.
 
 struct neighbour *ns[N_ROUTES];
 
+extern int mocked_kernel_route_calls;
+extern int mocked_kernel_multipath_calls;
+extern int mocked_kernel_last_multipath_count;
+extern int mocked_kernel_last_operation;
+extern int mocked_kernel_last_new_metric;
+
 int sign(int x) {
     if(x > 0)
         return 1;
@@ -1284,6 +1290,1473 @@ void format_xroute_metrics_labels_test(void)
     }
 }
 
+static void
+prepare_anycast_neighbour(struct neighbour *neigh)
+{
+    neigh->ifp->flags |= IF_UP;
+    neigh->ifp->flags |= IF_LQ;
+    if(neigh->ifp->cost == 0)
+        neigh->ifp->cost = 96;
+    if(neigh->ifp->buf.size < 512)
+        neigh->ifp->buf.size = 512;
+    neigh->txcost = 96;
+    neigh->hello.reach = 0xFFFF;
+    neigh->uhello.reach = 0xFFFF;
+    neigh->hello.time = now;
+    neigh->uhello.time = now;
+}
+
+static int
+buffered_updates_for_prefix(struct interface *ifp,
+                           const unsigned char *prefix,
+                           unsigned char plen,
+                           unsigned char ids[][8],
+                           int max_ids)
+{
+    int i, j;
+    int id_count = 0;
+
+    for(i = 0; i < ifp->num_buffered_updates; i++) {
+        struct buffered_update *u = &ifp->buffered_updates[i];
+        int seen = 0;
+
+        if(u->plen != plen || memcmp(u->prefix, prefix, 16) != 0)
+            continue;
+
+        for(j = 0; j < id_count; j++) {
+            if(memcmp(ids[j], u->id, 8) == 0) {
+                seen = 1;
+                break;
+            }
+        }
+
+        if(!seen && id_count < max_ids) {
+            memcpy(ids[id_count], u->id, 8);
+            id_count++;
+        }
+    }
+
+    return id_count;
+}
+
+void anycast_delayed_second_source_enables_multipath_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x00, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x22, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0xA1};
+    unsigned char id2[8] = {0xB2};
+    unsigned short seq = 100;
+    int old_multipath_ecmp = multipath_ecmp;
+    int base_mp_calls;
+
+    multipath_ecmp = ECMP_EQUAL;
+    mocked_kernel_route_calls = 0;
+    mocked_kernel_multipath_calls = 0;
+    mocked_kernel_last_multipath_count = 0;
+    mocked_kernel_last_operation = -1;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 1000;
+    update_route(id1, pfx, 128, zeroes, 0, seq, 10, 400,
+                 n1, nh1, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    if(!babel_check(r1 != NULL && r1->installed)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_delayed_second_source_enables_multipath_test setup (first route not installed).\n");
+        multipath_ecmp = old_multipath_ecmp;
+        return;
+    }
+
+    base_mp_calls = mocked_kernel_multipath_calls;
+
+    now.tv_sec += 20;
+    update_route(id2, pfx, 128, zeroes, 0, seqno_plus(seq, 1), 12, 400,
+                 n2, nh2, 0);
+
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    if(!babel_check(r2 != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_delayed_second_source_enables_multipath_test (second route missing).\n");
+    }
+
+    if(!babel_check(mocked_kernel_multipath_calls > base_mp_calls &&
+                mocked_kernel_last_multipath_count >= 2 &&
+                r1->installed > 0 && r2->installed > 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_delayed_second_source_enables_multipath_test.\n");
+        fprintf(stderr,
+            "Expected multipath programming with both routes marked installed participants (calls %d->%d, last nh count %d, r1 rank %d, r2 rank %d).\n",
+                base_mp_calls, mocked_kernel_multipath_calls,
+            mocked_kernel_last_multipath_count,
+            r1->installed, r2->installed);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+}
+
+void anycast_send_update_buffers_multiple_source_ids_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x00, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x33, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x44, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0xC1};
+    unsigned char id2[8] = {0xD2};
+    unsigned char seen_ids[8][8];
+    int seen;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 1200;
+    update_route(id1, pfx, 128, zeroes, 0, 200, 10, 400,
+                 n1, nh1, 0);
+    update_route(id2, pfx, 128, zeroes, 0, 201, 12, 400,
+                 n2, nh2, 0);
+
+    ifp->flags |= IF_UP;
+    free(ifp->buffered_updates);
+    ifp->buffered_updates = NULL;
+    ifp->num_buffered_updates = 0;
+    ifp->update_bufsize = 0;
+
+    send_update(ifp, 1, pfx, 128, zeroes, 0);
+
+    memset(seen_ids, 0, sizeof(seen_ids));
+    seen = buffered_updates_for_prefix(ifp, pfx, 128, seen_ids, 8);
+
+    if(!babel_check(seen >= 2)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_send_update_buffers_multiple_source_ids_test.\n");
+        fprintf(stderr,
+                "Expected at least 2 distinct source IDs in buffered updates for anycast prefix, got %d.\n",
+                seen);
+    }
+}
+
+void anycast_hard_retraction_keeps_route_via_other_source_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x00, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x55, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x66, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0xE1};
+    unsigned char id2[8] = {0xF2};
+    unsigned short retract_seqno;
+    unsigned char seen_ids[8][8];
+    int seen;
+    int old_multipath_ecmp = multipath_ecmp;
+    int old_enable_hard_withdraw = enable_hard_withdraw;
+
+    multipath_ecmp = ECMP_EQUAL;
+    enable_hard_withdraw = 1;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 1400;
+    update_route(id1, pfx, 128, zeroes, 0, 300, 10, 400,
+                 n1, nh1, 0);
+    update_route(id2, pfx, 128, zeroes, 0, 301, 12, 400,
+                 n2, nh2, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    if(!babel_check(r1 != NULL && r2 != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_hard_retraction_keeps_route_via_other_source_test setup (missing anycast routes).\n");
+        multipath_ecmp = old_multipath_ecmp;
+        enable_hard_withdraw = old_enable_hard_withdraw;
+        return;
+    }
+
+    retract_seqno = seqno_plus(r1->seqno, 1);
+    update_route(id1, pfx, 128, zeroes, 0,
+                 retract_seqno, INFINITY, 0,
+                 n1, nh1, 1);
+
+        ifp->flags |= IF_UP;
+        free(ifp->buffered_updates);
+        ifp->buffered_updates = NULL;
+        ifp->num_buffered_updates = 0;
+        ifp->update_bufsize = 0;
+        send_update(ifp, 1, pfx, 128, zeroes, 0);
+
+        memset(seen_ids, 0, sizeof(seen_ids));
+        seen = buffered_updates_for_prefix(ifp, pfx, 128, seen_ids, 8);
+
+        if(!babel_check(r2 != NULL && !r1->installed && seen >= 1)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_hard_retraction_keeps_route_via_other_source_test.\n");
+        fprintf(stderr,
+            "Expected hard retraction to remove primary install while preserving alternate source visibility; r2=%p r1_installed=%d buffered_ids=%d.\n",
+            (void*)r2, r1->installed, seen);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+    enable_hard_withdraw = old_enable_hard_withdraw;
+}
+
+void anycast_ecmp_metric_change_updates_kernel_metric_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x01, 0x01,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x0a, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x0a, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xaa, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xaa, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0xA3};
+    unsigned char id2[8] = {0xA4};
+    unsigned short seq = 600;
+    int old_multipath_ecmp = multipath_ecmp;
+    int old_reflect = reflect_kernel_metric;
+    int new_kernel_metric;
+    int base_mp_calls;
+
+    /* ECMP_WEIGHT mode: metric changes always push updated weights to kernel. */
+    multipath_ecmp = ECMP_WEIGHT;
+    reflect_kernel_metric = 1;
+    mocked_kernel_multipath_calls = 0;
+    mocked_kernel_last_multipath_count = 0;
+    mocked_kernel_last_new_metric = -1;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 1700;
+    update_route(id1, pfx, 128, zeroes, 0, seq, 10, 400, n1, nh1, 0);
+    update_route(id2, pfx, 128, zeroes, 0, seqno_plus(seq, 1), 12, 400, n2, nh2, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    if(!babel_check(r1 != NULL && r1->installed)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_metric_change_updates_kernel_metric_test setup.\n");
+        multipath_ecmp = old_multipath_ecmp;
+        reflect_kernel_metric = old_reflect;
+        return;
+    }
+
+    base_mp_calls = mocked_kernel_multipath_calls;
+
+    /* Increase r1 refmetric: should trigger a multipath MODIFY with new_metric. */
+    new_kernel_metric = metric_to_kernel(MIN(20 + neighbour_cost(n1), INFINITY));
+    change_route_metric(r1, 20, neighbour_cost(n1), 0);
+
+    if(!babel_check(mocked_kernel_multipath_calls > base_mp_calls &&
+                    mocked_kernel_last_new_metric == new_kernel_metric)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_metric_change_updates_kernel_metric_test.\n");
+        fprintf(stderr,
+                "Expected multipath MODIFY with new_metric=%d, got mp_calls=%d->%d last_new_metric=%d.\n",
+                new_kernel_metric,
+                base_mp_calls, mocked_kernel_multipath_calls,
+                mocked_kernel_last_new_metric);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+    reflect_kernel_metric = old_reflect;
+}
+
+void anycast_prefix96_delayed_second_source_enables_multipath_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x01, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x99, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x99, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0x93};
+    unsigned char id2[8] = {0x94};
+    unsigned short seq = 500;
+    int old_multipath_ecmp = multipath_ecmp;
+    int base_mp_calls;
+
+    multipath_ecmp = ECMP_EQUAL;
+    mocked_kernel_route_calls = 0;
+    mocked_kernel_multipath_calls = 0;
+    mocked_kernel_last_multipath_count = 0;
+    mocked_kernel_last_operation = -1;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 1600;
+    update_route(id1, pfx, 96, zeroes, 0, seq, 10, 400,
+                 n1, nh1, 0);
+
+    r1 = find_route(id1, pfx, 96, zeroes, 0, n1);
+    if(!babel_check(r1 != NULL && r1->installed)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_prefix96_delayed_second_source_enables_multipath_test setup (first /96 route not installed).\n");
+        multipath_ecmp = old_multipath_ecmp;
+        return;
+    }
+
+    base_mp_calls = mocked_kernel_multipath_calls;
+
+    now.tv_sec += 15;
+    update_route(id2, pfx, 96, zeroes, 0, seqno_plus(seq, 1), 12, 400,
+                 n2, nh2, 0);
+
+    r2 = find_route(id2, pfx, 96, zeroes, 0, n2);
+    if(!babel_check(r2 != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_prefix96_delayed_second_source_enables_multipath_test (second /96 route missing).\n");
+    }
+
+    if(!babel_check(mocked_kernel_multipath_calls > base_mp_calls &&
+                    mocked_kernel_last_multipath_count >= 2)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_prefix96_delayed_second_source_enables_multipath_test.\n");
+        fprintf(stderr,
+                "Expected multipath programming for same /96 prefix with delayed second source (calls %d->%d, last nh count %d).\n",
+                base_mp_calls, mocked_kernel_multipath_calls,
+                mocked_kernel_last_multipath_count);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+}
+
+void anycast_second_source_without_ecmp_keeps_singlepath_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x00, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x07, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x07, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x77, 0x77, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x88, 0x88, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0x91};
+    unsigned char id2[8] = {0x92};
+    unsigned short seq = 400;
+    int old_multipath_ecmp = multipath_ecmp;
+
+    multipath_ecmp = 0;
+    mocked_kernel_route_calls = 0;
+    mocked_kernel_multipath_calls = 0;
+    mocked_kernel_last_multipath_count = 0;
+    mocked_kernel_last_operation = -1;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 1500;
+    update_route(id1, pfx, 128, zeroes, 0, seq, 10, 400,
+                 n1, nh1, 0);
+    now.tv_sec += 10;
+    update_route(id2, pfx, 128, zeroes, 0, seqno_plus(seq, 1), 12, 400,
+                 n2, nh2, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+
+    if(!babel_check(r1 != NULL && r2 != NULL &&
+                    mocked_kernel_multipath_calls == 0 &&
+                    mocked_kernel_route_calls > 0 &&
+                ((r1->installed == 1 && r2->installed == 0) ||
+                 (r1->installed == 0 && r2->installed == 1)))) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_second_source_without_ecmp_keeps_singlepath_test.\n");
+        fprintf(stderr,
+            "Expected non-ECMP single-path ranks (primary=1, other=0) with no multipath kernel calls; route_calls=%d mp_calls=%d r1_rank=%d r2_rank=%d.\n",
+                mocked_kernel_route_calls,
+                mocked_kernel_multipath_calls,
+                r1 ? r1->installed : -1,
+                r2 ? r2->installed : -1);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+}
+
+void anycast_ecmp_with_unfeasible_alternates_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x02, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x11, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x11, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xbb, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xbb, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0xB1};
+    unsigned char id2[8] = {0xB2};
+    unsigned short seq = 700;
+    int old_multipath_ecmp = multipath_ecmp;
+    int base_mp_calls;
+    int mp_calls_after_unfeasible;
+
+    multipath_ecmp = ECMP_EQUAL;
+    mocked_kernel_route_calls = 0;
+    mocked_kernel_multipath_calls = 0;
+    mocked_kernel_last_multipath_count = 0;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 1800;
+    /* Create first feasible route */
+    update_route(id1, pfx, 128, zeroes, 0, seq, 10, 400, n1, nh1, 0);
+    
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    if(!babel_check(r1 != NULL && r1->installed == 1)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_with_unfeasible_alternates_test setup (first route not installed as primary).\n");
+        multipath_ecmp = old_multipath_ecmp;
+        return;
+    }
+
+    /* Create second feasible route to enable ECMP */
+    now.tv_sec += 15;
+    update_route(id2, pfx, 128, zeroes, 0, seqno_plus(seq, 1), 12, 400, n2, nh2, 0);
+    
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    if(!babel_check(r2 != NULL && r1->installed > 0 && r2->installed > 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_with_unfeasible_alternates_test setup (ECMP not enabled).\n");
+        multipath_ecmp = old_multipath_ecmp;
+        return;
+    }
+
+    base_mp_calls = mocked_kernel_multipath_calls;
+
+    /* Make r2 unfeasible by sending explicit retraction (infinity metric with TLV) */
+    unsigned short unfeasible_seqno = seqno_plus(r2->seqno, 1);
+    update_route(id2, pfx, 128, zeroes, 0,
+                 unfeasible_seqno, INFINITY, 0,
+                 n2, nh2, 1);
+
+    mp_calls_after_unfeasible = mocked_kernel_multipath_calls;
+    
+    /* After making r2 unfeasible via explicit retraction, it should be excluded from multipath.
+       r1 should remain rank 1 (primary), r2 should be rank 0 (not in multipath) */
+    if(!babel_check(r2->installed == 0 && r1->installed == 1)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_with_unfeasible_alternates_test.\n");
+        fprintf(stderr,
+            "Expected unfeasible route excluded from multipath (r2_rank=0, r1_rank=1); got r1_rank=%d r2_rank=%d mp_calls=%d->%d.\n",
+                r1->installed, r2->installed,
+                base_mp_calls, mp_calls_after_unfeasible);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+}
+
+void anycast_ecmp_shrink_to_single_nexthop_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x03, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x22, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x22, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xcc, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xcc, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0xC1};
+    unsigned char id2[8] = {0xC2};
+    unsigned short seq = 800;
+    unsigned short retract_seqno;
+    int old_multipath_ecmp = multipath_ecmp;
+    int old_enable_hard_withdraw = enable_hard_withdraw;
+    int base_mp_calls;
+    int mp_calls_after_retract;
+
+    multipath_ecmp = ECMP_EQUAL;
+    enable_hard_withdraw = 1;
+    mocked_kernel_route_calls = 0;
+    mocked_kernel_multipath_calls = 0;
+    mocked_kernel_last_multipath_count = 0;
+    mocked_kernel_last_operation = -1;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 1900;
+    /* Create first route */
+    update_route(id1, pfx, 128, zeroes, 0, seq, 10, 400, n1, nh1, 0);
+    
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    if(!babel_check(r1 != NULL && r1->installed == 1)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_shrink_to_single_nexthop_test setup (first route not installed).\n");
+        multipath_ecmp = old_multipath_ecmp;
+        enable_hard_withdraw = old_enable_hard_withdraw;
+        return;
+    }
+
+    /* Create second route to enable ECMP multipath */
+    now.tv_sec += 15;
+    update_route(id2, pfx, 128, zeroes, 0, seqno_plus(seq, 1), 12, 400, n2, nh2, 0);
+    
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    if(!babel_check(r2 != NULL && r1->installed > 0 && r2->installed > 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_shrink_to_single_nexthop_test setup (ECMP not established).\n");
+        multipath_ecmp = old_multipath_ecmp;
+        enable_hard_withdraw = old_enable_hard_withdraw;
+        return;
+    }
+
+    base_mp_calls = mocked_kernel_multipath_calls;
+
+    /* Hard retract one route via explicit retraction (sequence bump + INFINITY) */
+    retract_seqno = seqno_plus(r1->seqno, 1);
+    update_route(id1, pfx, 128, zeroes, 0,
+                 retract_seqno, INFINITY, 0,
+                 n1, nh1, 1);
+
+    mp_calls_after_retract = mocked_kernel_multipath_calls;
+
+    /* After hard retraction of r1, it should be uninstalled (rank 0),
+       r2 should become primary-only (rank 1), not ECMP anymore */
+    if(!babel_check(r1->installed == 0 && r2->installed == 1 &&
+                    mp_calls_after_retract >= base_mp_calls)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_shrink_to_single_nexthop_test.\n");
+        fprintf(stderr,
+            "Expected hard retract to shrink ECMP to single-path (r1_rank=0, r2_rank=1); got r1_rank=%d r2_rank=%d mp_calls=%d->%d.\n",
+                r1->installed, r2->installed,
+                base_mp_calls, mp_calls_after_retract);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+    enable_hard_withdraw = old_enable_hard_withdraw;
+}
+
+void flush_ecmp_secondary_member_reprograms_kernel_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    struct babel_route *primary, *secondary;
+    struct neighbour *secondary_neigh;
+    unsigned char secondary_id[8];
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x03, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x22, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x22, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xcc, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xcc, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0xC1};
+    unsigned char id2[8] = {0xC2};
+    unsigned short seq = 800;
+    int old_multipath_ecmp = multipath_ecmp;
+    int base_mp_calls;
+    int base_route_calls;
+
+    multipath_ecmp = ECMP_EQUAL;
+    mocked_kernel_route_calls = 0;
+    mocked_kernel_multipath_calls = 0;
+    mocked_kernel_last_operation = -1;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 2300;
+    update_route(id1, pfx, 128, zeroes, 0, seq, 10, 400, n1, nh1, 0);
+    update_route(id2, pfx, 128, zeroes, 0, seqno_plus(seq, 1), 12, 400, n2, nh2, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    if(!babel_check(r1 != NULL && r2 != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on flush_ecmp_secondary_member_reprograms_kernel_test setup.\n");
+        fprintf(stderr,
+                "r1=%p r2=%p r1_rank=%d r2_rank=%d route_calls=%d mp_calls=%d.\n",
+                (void*)r1, (void*)r2,
+                r1 ? r1->installed : -1,
+                r2 ? r2->installed : -1,
+                mocked_kernel_route_calls,
+                mocked_kernel_multipath_calls);
+        multipath_ecmp = old_multipath_ecmp;
+        return;
+    }
+
+    /* Seed the exact state flush_route needs to exercise: one installed
+       primary route and one installed ECMP secondary member in the same slot. */
+    primary = r1;
+    secondary = r2;
+    primary->installed = 1;
+    secondary->installed = 2;
+
+    memcpy(secondary_id, secondary->src->id, 8);
+    secondary_neigh = secondary->neigh;
+
+    base_mp_calls = mocked_kernel_multipath_calls;
+    base_route_calls = mocked_kernel_route_calls;
+
+    flush_route(secondary);
+
+    if(!babel_check((mocked_kernel_route_calls > base_route_calls ||
+                     mocked_kernel_multipath_calls > base_mp_calls) &&
+                    mocked_kernel_last_operation == ROUTE_MODIFY &&
+                    primary->installed == 1 &&
+                    find_route(secondary_id, pfx, 128, zeroes, 0,
+                               secondary_neigh) == NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on flush_ecmp_secondary_member_reprograms_kernel_test.\n");
+        fprintf(stderr,
+                "Expected flushing an installed ECMP secondary to rebuild kernel route and leave only the primary installed; route_calls=%d->%d mp_calls=%d->%d last_op=%d primary_rank=%d.\n",
+                base_route_calls, mocked_kernel_route_calls,
+                base_mp_calls, mocked_kernel_multipath_calls,
+                mocked_kernel_last_operation,
+                primary->installed);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+}
+
+void flush_primary_with_alternate_reprograms_kernel_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    struct babel_route *primary, *alternate;
+    struct neighbour *primary_neigh;
+    unsigned char primary_id[8];
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x0a, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x64, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x64, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xa4, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xa4, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0xA1};
+    unsigned char id2[8] = {0xA2};
+    unsigned short seq = 1500;
+    int old_multipath_ecmp = multipath_ecmp;
+    int base_mp_calls;
+    int base_route_calls;
+
+    multipath_ecmp = ECMP_EQUAL;
+    mocked_kernel_route_calls = 0;
+    mocked_kernel_multipath_calls = 0;
+    mocked_kernel_last_operation = -1;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 2600;
+    update_route(id1, pfx, 128, zeroes, 0, seq, 10, 400, n1, nh1, 0);
+    update_route(id2, pfx, 128, zeroes, 0, seqno_plus(seq, 1), 12, 400, n2, nh2, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    if(!babel_check(r1 != NULL && r2 != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on flush_primary_with_alternate_reprograms_kernel_test setup.\n");
+        multipath_ecmp = old_multipath_ecmp;
+        return;
+    }
+
+    primary = r1;
+    alternate = r2;
+    primary->installed = 1;
+    alternate->installed = 2;
+
+    memcpy(primary_id, primary->src->id, 8);
+    primary_neigh = primary->neigh;
+
+    base_mp_calls = mocked_kernel_multipath_calls;
+    base_route_calls = mocked_kernel_route_calls;
+
+    flush_route(primary);
+
+    if(!babel_check((mocked_kernel_route_calls > base_route_calls ||
+                     mocked_kernel_multipath_calls > base_mp_calls) &&
+                    mocked_kernel_last_operation == ROUTE_MODIFY &&
+                    alternate->installed == 1 &&
+                    find_route(primary_id, pfx, 128, zeroes, 0,
+                               primary_neigh) == NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on flush_primary_with_alternate_reprograms_kernel_test.\n");
+        fprintf(stderr,
+                "Expected flushing installed primary with an alternate to reprogram kernel and promote alternate; route_calls=%d->%d mp_calls=%d->%d last_op=%d alternate_rank=%d.\n",
+                base_route_calls, mocked_kernel_route_calls,
+                base_mp_calls, mocked_kernel_multipath_calls,
+                mocked_kernel_last_operation,
+                alternate->installed);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+}
+
+void flush_neighbour_routes_ecmp_secondary_member_reprograms_kernel_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    struct babel_route *primary, *secondary;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x08, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x62, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x62, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xa2, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xa2, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0x81};
+    unsigned char id2[8] = {0x82};
+    unsigned short seq = 1300;
+    int old_multipath_ecmp = multipath_ecmp;
+    int base_mp_calls;
+    int base_route_calls;
+
+    multipath_ecmp = ECMP_EQUAL;
+    mocked_kernel_route_calls = 0;
+    mocked_kernel_multipath_calls = 0;
+    mocked_kernel_last_operation = -1;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 2400;
+    update_route(id1, pfx, 128, zeroes, 0, seq, 10, 400, n1, nh1, 0);
+    update_route(id2, pfx, 128, zeroes, 0, seqno_plus(seq, 1), 12, 400, n2, nh2, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    if(!babel_check(r1 != NULL && r2 != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on flush_neighbour_routes_ecmp_secondary_member_reprograms_kernel_test setup.\n");
+        multipath_ecmp = old_multipath_ecmp;
+        return;
+    }
+
+    primary = r1;
+    secondary = r2;
+    primary->installed = 1;
+    secondary->installed = 2;
+
+    base_mp_calls = mocked_kernel_multipath_calls;
+    base_route_calls = mocked_kernel_route_calls;
+
+    flush_neighbour_routes(secondary->neigh);
+
+    if(!babel_check((mocked_kernel_route_calls > base_route_calls ||
+                     mocked_kernel_multipath_calls > base_mp_calls) &&
+                    mocked_kernel_last_operation == ROUTE_MODIFY &&
+                    primary->installed == 1 &&
+                    find_route(id2, pfx, 128, zeroes, 0, n2) == NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on flush_neighbour_routes_ecmp_secondary_member_reprograms_kernel_test.\n");
+        fprintf(stderr,
+                "Expected neighbour flush of an ECMP secondary to rebuild kernel route and remove only that route; route_calls=%d->%d mp_calls=%d->%d last_op=%d primary_rank=%d.\n",
+                base_route_calls, mocked_kernel_route_calls,
+                base_mp_calls, mocked_kernel_multipath_calls,
+                mocked_kernel_last_operation,
+                primary->installed);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+}
+
+void flush_interface_routes_ecmp_secondary_member_reprograms_kernel_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct interface *ifp2 = add_interface("test_if_ecmp_if2", NULL);
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    struct babel_route *primary, *secondary;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x09, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x63, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x63, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xa3, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xa3, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0x91};
+    unsigned char id2[8] = {0x92};
+    unsigned short seq = 1400;
+    int old_multipath_ecmp = multipath_ecmp;
+    int base_mp_calls;
+    int base_route_calls;
+
+    multipath_ecmp = ECMP_EQUAL;
+    mocked_kernel_route_calls = 0;
+    mocked_kernel_multipath_calls = 0;
+    mocked_kernel_last_operation = -1;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp2);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 2500;
+    update_route(id1, pfx, 128, zeroes, 0, seq, 10, 400, n1, nh1, 0);
+    update_route(id2, pfx, 128, zeroes, 0, seqno_plus(seq, 1), 12, 400, n2, nh2, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    if(!babel_check(r1 != NULL && r2 != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on flush_interface_routes_ecmp_secondary_member_reprograms_kernel_test setup.\n");
+        multipath_ecmp = old_multipath_ecmp;
+        return;
+    }
+
+    primary = r1;
+    secondary = r2;
+    primary->installed = 1;
+    secondary->installed = 2;
+
+    base_mp_calls = mocked_kernel_multipath_calls;
+    base_route_calls = mocked_kernel_route_calls;
+
+    flush_interface_routes(ifp2, 0);
+
+    if(!babel_check((mocked_kernel_route_calls > base_route_calls ||
+                     mocked_kernel_multipath_calls > base_mp_calls) &&
+                    mocked_kernel_last_operation == ROUTE_MODIFY &&
+                    primary->installed == 1 &&
+                    find_route(id2, pfx, 128, zeroes, 0, n2) == NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on flush_interface_routes_ecmp_secondary_member_reprograms_kernel_test.\n");
+        fprintf(stderr,
+                "Expected interface flush of an ECMP secondary to rebuild kernel route and remove only that route; route_calls=%d->%d mp_calls=%d->%d last_op=%d primary_rank=%d.\n",
+                base_route_calls, mocked_kernel_route_calls,
+                base_mp_calls, mocked_kernel_multipath_calls,
+                mocked_kernel_last_operation,
+                primary->installed);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+}
+
+void anycast_ecmp_equal_metric_change_does_not_reprogram_kernel_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x04, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x31, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x31, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xdd, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xdd, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0xD1};
+    unsigned char id2[8] = {0xD2};
+    unsigned short seq = 900;
+    int old_multipath_ecmp = multipath_ecmp;
+    int old_reflect = reflect_kernel_metric;
+    int base_mp_calls;
+    int base_route_calls;
+
+    multipath_ecmp = ECMP_EQUAL;
+    reflect_kernel_metric = 1;
+    mocked_kernel_route_calls = 0;
+    mocked_kernel_multipath_calls = 0;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 2000;
+    update_route(id1, pfx, 128, zeroes, 0, seq, 10, 400, n1, nh1, 0);
+    update_route(id2, pfx, 128, zeroes, 0, seqno_plus(seq, 1), 12, 400, n2, nh2, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    if(!babel_check(r1 != NULL && r2 != NULL && r1->installed > 0 && r2->installed > 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_equal_metric_change_does_not_reprogram_kernel_test setup.\n");
+        multipath_ecmp = old_multipath_ecmp;
+        reflect_kernel_metric = old_reflect;
+        return;
+    }
+
+    base_mp_calls = mocked_kernel_multipath_calls;
+    base_route_calls = mocked_kernel_route_calls;
+
+    /* Finite metric change, same nexthop set: ECMP_EQUAL must not reprogram kernel. */
+    change_route_metric(r1, 20, neighbour_cost(n1), 0);
+
+    if(!babel_check(mocked_kernel_multipath_calls == base_mp_calls &&
+                    mocked_kernel_route_calls == base_route_calls &&
+                    r1->installed > 0 && r2->installed > 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_equal_metric_change_does_not_reprogram_kernel_test.\n");
+        fprintf(stderr,
+                "Expected no kernel reprogramming for finite metric-only change in ECMP_EQUAL; route_calls=%d->%d mp_calls=%d->%d r1_rank=%d r2_rank=%d.\n",
+                base_route_calls, mocked_kernel_route_calls,
+                base_mp_calls, mocked_kernel_multipath_calls,
+                r1->installed, r2->installed);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+    reflect_kernel_metric = old_reflect;
+}
+
+void anycast_ecmp_equal_infinity_retraction_reprograms_kernel_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x05, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x41, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x41, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xee, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xee, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0xE1};
+    unsigned char id2[8] = {0xE2};
+    unsigned short seq = 1000;
+    int old_multipath_ecmp = multipath_ecmp;
+    int old_reflect = reflect_kernel_metric;
+    int base_mp_calls;
+    int base_route_calls;
+
+    multipath_ecmp = ECMP_EQUAL;
+    reflect_kernel_metric = 1;
+    mocked_kernel_route_calls = 0;
+    mocked_kernel_multipath_calls = 0;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 2100;
+    update_route(id1, pfx, 128, zeroes, 0, seq, 10, 400, n1, nh1, 0);
+    update_route(id2, pfx, 128, zeroes, 0, seqno_plus(seq, 1), 12, 400, n2, nh2, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    if(!babel_check(r1 != NULL && r2 != NULL && r1->installed > 0 && r2->installed > 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_equal_infinity_retraction_reprograms_kernel_test setup.\n");
+        multipath_ecmp = old_multipath_ecmp;
+        reflect_kernel_metric = old_reflect;
+        return;
+    }
+
+    base_mp_calls = mocked_kernel_multipath_calls;
+    base_route_calls = mocked_kernel_route_calls;
+
+    /* INFINITY retraction must reprogram kernel in ECMP_EQUAL. */
+    change_route_metric(r1, INFINITY, INFINITY, 0);
+
+        if(!babel_check((mocked_kernel_multipath_calls > base_mp_calls ||
+                 mocked_kernel_route_calls > base_route_calls) &&
+                (r1->installed == 1 || r2->installed == 1) &&
+                !(r1->installed > 0 && r2->installed > 0))) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_equal_infinity_retraction_reprograms_kernel_test.\n");
+        fprintf(stderr,
+            "Expected kernel reprogramming on INFINITY retraction in ECMP_EQUAL and no dual-active ECMP set; route_calls=%d->%d mp_calls=%d->%d r1_rank=%d r2_rank=%d.\n",
+                base_route_calls, mocked_kernel_route_calls,
+                base_mp_calls, mocked_kernel_multipath_calls,
+                r1->installed, r2->installed);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+    reflect_kernel_metric = old_reflect;
+}
+
+void anycast_ecmp_equal_repeated_finite_metric_changes_skip_reprogram_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x06, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x51, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x51, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xff, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xff, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0xF1};
+    unsigned char id2[8] = {0xF2};
+    unsigned short seq = 1100;
+    int old_multipath_ecmp = multipath_ecmp;
+    int old_reflect = reflect_kernel_metric;
+    int base_mp_calls;
+    int base_route_calls;
+
+    multipath_ecmp = ECMP_EQUAL;
+    reflect_kernel_metric = 1;
+    mocked_kernel_route_calls = 0;
+    mocked_kernel_multipath_calls = 0;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 2200;
+    update_route(id1, pfx, 128, zeroes, 0, seq, 10, 400, n1, nh1, 0);
+    update_route(id2, pfx, 128, zeroes, 0, seqno_plus(seq, 1), 12, 400, n2, nh2, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    if(!babel_check(r1 != NULL && r2 != NULL && r1->installed > 0 && r2->installed > 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_equal_repeated_finite_metric_changes_skip_reprogram_test setup.\n");
+        multipath_ecmp = old_multipath_ecmp;
+        reflect_kernel_metric = old_reflect;
+        return;
+    }
+
+    base_mp_calls = mocked_kernel_multipath_calls;
+    base_route_calls = mocked_kernel_route_calls;
+
+    change_route_metric(r1, 20, neighbour_cost(n1), 0);
+    change_route_metric(r1, 24, neighbour_cost(n1), 0);
+    change_route_metric(r1, 28, neighbour_cost(n1), 0);
+
+    if(!babel_check(mocked_kernel_multipath_calls == base_mp_calls &&
+                    mocked_kernel_route_calls == base_route_calls &&
+                    r1->installed > 0 && r2->installed > 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_equal_repeated_finite_metric_changes_skip_reprogram_test.\n");
+        fprintf(stderr,
+                "Expected repeated finite metric changes to avoid kernel reprogramming in ECMP_EQUAL; route_calls=%d->%d mp_calls=%d->%d r1_rank=%d r2_rank=%d.\n",
+                base_route_calls, mocked_kernel_route_calls,
+                base_mp_calls, mocked_kernel_multipath_calls,
+                r1->installed, r2->installed);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+    reflect_kernel_metric = old_reflect;
+}
+
+void route_stream_traverses_multipath_members_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    struct route_stream *stream;
+    struct babel_route *r;
+    int seen1 = 0, seen2 = 0;
+    int old_multipath_ecmp = multipath_ecmp;
+    int old_window = ecmp_metric_window;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x0c, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x72, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x72, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xc1, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xc1, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0xC1};
+    unsigned char id2[8] = {0xC2};
+
+    multipath_ecmp = ECMP_EQUAL;
+    ecmp_metric_window = 200;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 2800;
+    update_route(id1, pfx, 128, zeroes, 0, 1800, 10, 400, n1, nh1, 0);
+    update_route(id2, pfx, 128, zeroes, 0, 1801, 12, 400, n2, nh2, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    stream = route_stream(0);
+    if(stream) {
+        while((r = route_stream_next(stream)) != NULL) {
+            if(r == r1)
+                seen1 = 1;
+            else if(r == r2)
+                seen2 = 1;
+        }
+        route_stream_done(stream);
+    }
+
+    if(!babel_check(r1 != NULL && r2 != NULL && seen1 && seen2)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on route_stream_traverses_multipath_members_test.\n");
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+    ecmp_metric_window = old_window;
+}
+
+void refresh_promotes_member_preserving_group_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    struct babel_route *head, *member;
+    int slot;
+    int old_multipath_ecmp = multipath_ecmp;
+    int old_window = ecmp_metric_window;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x0d, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x73, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x73, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xd1, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xd1, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char id1[8] = {0xD1};
+    unsigned char id2[8] = {0xD2};
+
+    multipath_ecmp = ECMP_EQUAL;
+    ecmp_metric_window = 200;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 2900;
+    update_route(id1, pfx, 128, zeroes, 0, 1900, 10, 400, n1, nh1, 0);
+    update_route(id2, pfx, 128, zeroes, 0, 1901, 12, 400, n2, nh2, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    slot = find_route_slot(NULL, pfx, 128, zeroes, 0, NULL);
+
+    if(!babel_check(r1 != NULL && r2 != NULL && slot >= 0 && routes[slot] != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on refresh_promotes_member_preserving_group_test setup.\n");
+        multipath_ecmp = old_multipath_ecmp;
+        ecmp_metric_window = old_window;
+        return;
+    }
+
+    head = routes[slot];
+    member = (head == r1) ? r2 : r1;
+
+    head->refmetric = INFINITY;
+    refresh_installed_ranks(member);
+
+    if(!babel_check(routes[slot] == member &&
+                    member->multipath == head &&
+                    head->next == NULL &&
+                    member->installed == 1)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on refresh_promotes_member_preserving_group_test.\n");
+    }
+
+    /* Restore finite metric state to keep teardown behaviour deterministic. */
+    head->refmetric = 10;
+
+    multipath_ecmp = old_multipath_ecmp;
+    ecmp_metric_window = old_window;
+}
+
+void refresh_installed_ranks_preserves_other_groups_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2, *n3;
+    struct babel_route *r1, *r2, *r3;
+    int slot;
+    int old_multipath_ecmp = multipath_ecmp;
+    int old_window = ecmp_metric_window;
+    unsigned char pfx[16] =
+        {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x0d, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x73, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x73, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x22};
+    unsigned char nh3[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x73, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x33};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xe1, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xe1, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a3[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0xe1, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03};
+    unsigned char id1[8] = {0xE1};
+    unsigned char id2[8] = {0xE2};
+    unsigned char id3[8] = {0xE3};
+
+    multipath_ecmp = ECMP_EQUAL;
+    ecmp_metric_window = 50;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    n3 = find_neighbour(a3, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+    prepare_anycast_neighbour(n3);
+
+    now.tv_sec = 3000;
+    update_route(id1, pfx, 128, zeroes, 0, 2000, 10, 400, n1, nh1, 0);
+    update_route(id2, pfx, 128, zeroes, 0, 2001, 12, 420, n2, nh2, 0);
+    update_route(id3, pfx, 128, zeroes, 0, 2002, 14, 900, n3, nh3, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    r3 = find_route(id3, pfx, 128, zeroes, 0, n3);
+    slot = find_route_slot(NULL, pfx, 128, zeroes, 0, NULL);
+
+    if(!babel_check(r1 != NULL && r2 != NULL && r3 != NULL && slot >= 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on refresh_installed_ranks_preserves_other_groups_test setup.\n");
+        multipath_ecmp = old_multipath_ecmp;
+        ecmp_metric_window = old_window;
+        return;
+    }
+
+    routes[slot] = r1;
+    r1->next = r3;
+    r1->multipath = r2;
+    r2->next = NULL;
+    r2->multipath = NULL;
+    r3->next = NULL;
+    r3->multipath = NULL;
+
+    r3->installed = 7;
+    refresh_installed_ranks(r1);
+
+        if(!babel_check(r3->installed == 7 &&
+                r1->installed > 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on refresh_installed_ranks_preserves_other_groups_test.\n");
+        fprintf(stderr,
+            "installed values: r1=%d r2=%d r3=%d\n",
+            r1->installed, r2->installed, r3->installed);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+    ecmp_metric_window = old_window;
+}
+
 void route_setup(void) {
     static unsigned short setup_seqno = 0;
     unsigned short seqno;
@@ -1387,6 +2860,42 @@ void route_test_suite(void)
                    "explicit_retraction_without_tlv_keeps_installed_test");
     run_test(kernel_delete_babel_proto_flushes_matching_xroute_test,
              "kernel_delete_babel_proto_flushes_matching_xroute_test");
+    run_route_test(anycast_delayed_second_source_enables_multipath_test,
+                   "anycast_delayed_second_source_enables_multipath_test");
+    run_route_test(anycast_send_update_buffers_multiple_source_ids_test,
+                   "anycast_send_update_buffers_multiple_source_ids_test");
+    run_route_test(anycast_hard_retraction_keeps_route_via_other_source_test,
+                   "anycast_hard_retraction_keeps_route_via_other_source_test");
+    run_route_test(anycast_second_source_without_ecmp_keeps_singlepath_test,
+                   "anycast_second_source_without_ecmp_keeps_singlepath_test");
+    run_route_test(anycast_prefix96_delayed_second_source_enables_multipath_test,
+                   "anycast_prefix96_delayed_second_source_enables_multipath_test");
+    run_route_test(anycast_ecmp_metric_change_updates_kernel_metric_test,
+                   "anycast_ecmp_metric_change_updates_kernel_metric_test");
+    run_route_test(anycast_ecmp_with_unfeasible_alternates_test,
+                   "anycast_ecmp_with_unfeasible_alternates_test");
+    run_route_test(anycast_ecmp_shrink_to_single_nexthop_test,
+                   "anycast_ecmp_shrink_to_single_nexthop_test");
+    run_route_test(flush_ecmp_secondary_member_reprograms_kernel_test,
+                   "flush_ecmp_secondary_member_reprograms_kernel_test");
+    run_route_test(flush_primary_with_alternate_reprograms_kernel_test,
+                   "flush_primary_with_alternate_reprograms_kernel_test");
+    run_route_test(flush_neighbour_routes_ecmp_secondary_member_reprograms_kernel_test,
+                   "flush_neighbour_routes_ecmp_secondary_member_reprograms_kernel_test");
+    run_route_test(flush_interface_routes_ecmp_secondary_member_reprograms_kernel_test,
+                   "flush_interface_routes_ecmp_secondary_member_reprograms_kernel_test");
+    run_route_test(anycast_ecmp_equal_metric_change_does_not_reprogram_kernel_test,
+                   "anycast_ecmp_equal_metric_change_does_not_reprogram_kernel_test");
+    run_route_test(anycast_ecmp_equal_infinity_retraction_reprograms_kernel_test,
+                   "anycast_ecmp_equal_infinity_retraction_reprograms_kernel_test");
+    run_route_test(anycast_ecmp_equal_repeated_finite_metric_changes_skip_reprogram_test,
+                   "anycast_ecmp_equal_repeated_finite_metric_changes_skip_reprogram_test");
+    run_route_test(route_stream_traverses_multipath_members_test,
+                   "route_stream_traverses_multipath_members_test");
+    run_route_test(refresh_promotes_member_preserving_group_test,
+                   "refresh_promotes_member_preserving_group_test");
+    run_route_test(refresh_installed_ranks_preserves_other_groups_test,
+                   "refresh_installed_ranks_preserves_other_groups_test");
     fprintf(stderr, "-----------------------------------------------\n");
     fprintf(stderr, "Executed tests\n");
 }
