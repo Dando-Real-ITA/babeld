@@ -449,26 +449,99 @@ flush_route(struct babel_route *route)
     int i;
     struct source *src;
     unsigned oldmetric;
+    int has_alternate = 0;
+    int update_ecmp = 0;
     int lost = 0;
 
     oldmetric = route_metric(route);
     src = route->src;
-
-    if(route->installed) {
-        uninstall_route(route);
-        lost = 1;
-    }
 
     i = find_route_slot(route->src->id,
                         route->src->prefix, route->src->plen,
                         route->src->src_prefix, route->src->src_plen, NULL);
     assert(i >= 0 && i < route_slots);
 
+    if(route->installed == 1) {
+        /* Primary route: check if there are other installed ECMP members */
+        struct babel_route *head = routes[i];
+        has_alternate = 0;
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(r != route && r->installed > 1) {
+                    has_alternate = 1;
+                    break;
+                }
+                r = r->multipath;
+            }
+            if(has_alternate)
+                break;
+            head = head->next;
+        }
+        
+        if(has_alternate) {
+            update_ecmp = 1;
+        } else {
+            uninstall_route(route);
+            lost = 1;
+        }
+    } else if(route->installed > 1) {
+        /* Secondary ECMP member: primary exists, need to reprogram */
+        update_ecmp = 1;
+    }
+
     local_notify_route(route, LOCAL_FLUSH);
 
-    if(route == routes[i]) {
-        routes[i] = route->next;
-        route->next = NULL;
+    {
+        struct babel_route *prev_head = NULL;
+        struct babel_route *head = routes[i];
+        int removed = 0;
+
+        while(head) {
+            if(head == route) {
+                if(head->multipath) {
+                    struct babel_route *new_head = head->multipath;
+                    new_head->next = head->next;
+                    if(prev_head)
+                        prev_head->next = new_head;
+                    else
+                        routes[i] = new_head;
+                    head->next = NULL;
+                    head->multipath = NULL;
+                } else {
+                    if(prev_head)
+                        prev_head->next = head->next;
+                    else
+                        routes[i] = head->next;
+                    head->next = NULL;
+                }
+                removed = 1;
+                break;
+            }
+
+            {
+                struct babel_route *prev_mp = head;
+                struct babel_route *mp = head->multipath;
+                while(mp) {
+                    if(mp == route) {
+                        prev_mp->multipath = mp->multipath;
+                        mp->multipath = NULL;
+                        removed = 1;
+                        break;
+                    }
+                    prev_mp = mp;
+                    mp = mp->multipath;
+                }
+            }
+
+            if(removed)
+                break;
+
+            prev_head = head;
+            head = head->next;
+        }
+
+        assert(removed);
         destroy_route(route);
 
         if(routes[i] == NULL) {
@@ -484,13 +557,25 @@ flush_route(struct babel_route *route)
             resize_route_table(0);
         else if(max_route_slots > 8 && route_slots < max_route_slots / 4)
             resize_route_table(max_route_slots / 2);
-    } else {
-        struct babel_route *r = routes[i];
-        while(r->next != route)
-            r = r->next;
-        r->next = route->next;
-        route->next = NULL;
-        destroy_route(route);
+    }
+
+    if(update_ecmp && i < route_slots && routes[i] != NULL &&
+       route_compare(NULL, src->prefix, src->plen,
+                     src->src_prefix, src->src_plen,
+                     routes[i]) == 0) {
+        struct babel_route *primary = routes[i];
+        int rc;
+        int metric = metric_to_kernel(route_metric(primary));
+
+        rc = change_route(ROUTE_MODIFY, primary, metric,
+                          primary->nexthop,
+                          primary->neigh->ifp->ifindex,
+                          metric,
+                          NULL, NULL, NULL);
+        if(rc < 0)
+            perror("kernel_route(MODIFY flush ecmp member)");
+
+        refresh_installed_ranks(primary);
     }
 
     if(lost)
@@ -504,12 +589,10 @@ flush_all_routes()
 {
     int i;
 
-    /* Start from the end, to avoid shifting the table. */
     i = route_slots - 1;
     while(i >= 0) {
         while(i < route_slots) {
-            /* Uninstall first, to avoid calling route_lost. */
-            if(routes[i]->installed)
+            if(routes[i]->installed == 1)
                 uninstall_route(routes[i]);
             flush_route(routes[i]);
         }
@@ -526,14 +609,17 @@ flush_neighbour_routes(struct neighbour *neigh)
 
     i = 0;
     while(i < route_slots) {
-        struct babel_route *r;
-        r = routes[i];
-        while(r) {
-            if(r->neigh == neigh) {
-                flush_route(r);
-                goto again;
+        struct babel_route *head = routes[i];
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(r->neigh == neigh) {
+                    flush_route(r);
+                    goto again;
+                }
+                r = r->multipath;
             }
-            r = r->next;
+            head = head->next;
         }
         i++;
     again:
@@ -548,15 +634,18 @@ flush_interface_routes(struct interface *ifp, int v4only)
 
     i = 0;
     while(i < route_slots) {
-        struct babel_route *r;
-        r = routes[i];
-        while(r) {
-            if(r->neigh->ifp == ifp &&
-               (!v4only || v4mapped(r->nexthop))) {
-                flush_route(r);
-                goto again;
+        struct babel_route *head = routes[i];
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(r->neigh->ifp == ifp &&
+                   (!v4only || v4mapped(r->nexthop))) {
+                    flush_route(r);
+                    goto again;
+                }
+                r = r->multipath;
             }
-            r = r->next;
+            head = head->next;
         }
         i++;
     again:
