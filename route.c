@@ -656,6 +656,7 @@ flush_interface_routes(struct interface *ifp, int v4only)
 struct route_stream {
     int installed;
     int index;
+    struct babel_route *head;
     struct babel_route *next;
 };
 
@@ -669,38 +670,60 @@ route_stream(int installed)
         return NULL;
 
     stream->installed = installed;
-    stream->index = installed ? 0 : -1;
+    stream->index = -1;
+    stream->head = NULL;
     stream->next = NULL;
 
     return stream;
 }
 
+static struct babel_route *
+route_stream_next_any(struct route_stream *stream)
+{
+    while(1) {
+        if(stream->next == NULL) {
+            stream->index++;
+            while(stream->index < route_slots && routes[stream->index] == NULL)
+                stream->index++;
+            if(stream->index >= route_slots)
+                return NULL;
+            stream->head = routes[stream->index];
+            stream->next = stream->head;
+            return stream->next;
+        }
+
+        if(stream->next->multipath) {
+            stream->next = stream->next->multipath;
+            return stream->next;
+        }
+
+        if(stream->head && stream->head->next) {
+            stream->head = stream->head->next;
+            stream->next = stream->head;
+            return stream->next;
+        } else {
+            stream->head = NULL;
+            stream->next = NULL;
+        }
+    }
+}
+
 struct babel_route *
 route_stream_next(struct route_stream *stream)
 {
+    struct babel_route *next;
+
     if(stream->installed) {
-        while(stream->index < route_slots) {
-            if(routes[stream->index]->installed)
-                break;
-            else
-                stream->index++;
-        }
-        if(stream->index < route_slots)
-            return routes[stream->index++];
-        else
-            return NULL;
-    } else {
-        struct babel_route *next;
-        if(!stream->next) {
-            stream->index++;
-            if(stream->index >= route_slots)
+        while(1) {
+            next = route_stream_next_any(stream);
+            if(next == NULL)
                 return NULL;
-            stream->next = routes[stream->index];
+            if(next->installed == 1)
+                return next;
         }
-        next = stream->next;
-        stream->next = next->next;
-        return next;
     }
+
+    return route_stream_next_any(stream);
 }
 
 void
