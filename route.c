@@ -745,19 +745,70 @@ metric_to_kernel(int metric)
         }
 }
 
-/* This is used to maintain the invariant that the installed route is at
-   the head of the list. */
 static void
 move_installed_route(struct babel_route *route, int i)
 {
-    assert(i >= 0 && i < route_slots);
-    assert(route->installed);
+    struct babel_route *prev_head = NULL;
+    struct babel_route *head = routes[i];
+    struct babel_route *group_head = NULL;
+    struct babel_route *group_prev_head = NULL;
+    struct babel_route *prev_mp = NULL;
 
-    if(route != routes[i]) {
-        struct babel_route *r = routes[i];
-        while(r->next != route)
-            r = r->next;
-        r->next = route->next;
+    assert(i >= 0 && i < route_slots);
+    assert(route->installed == 1);
+
+    while(head) {
+        if(head == route) {
+            group_head = head;
+            group_prev_head = prev_head;
+            break;
+        }
+
+        prev_mp = head;
+        {
+            struct babel_route *mp = head->multipath;
+            while(mp) {
+                if(mp == route) {
+                    group_head = head;
+                    group_prev_head = prev_head;
+                    break;
+                }
+                prev_mp = mp;
+                mp = mp->multipath;
+            }
+        }
+
+        if(group_head)
+            break;
+
+        prev_head = head;
+        head = head->next;
+    }
+
+    if(group_head == NULL)
+        return;
+
+    if(group_head != route) {
+        prev_mp->multipath = route->multipath;
+        route->multipath = group_head;
+        route->next = group_head->next;
+        group_head->next = NULL;
+
+        if(group_prev_head)
+            group_prev_head->next = route;
+        else
+            routes[i] = route;
+    }
+
+    if(routes[i] != route) {
+        struct babel_route *p = group_prev_head;
+        if(p == NULL) {
+            p = routes[i];
+            while(p && p->next != route)
+                p = p->next;
+        }
+        if(p)
+            p->next = route->next;
         route->next = routes[i];
         routes[i] = route;
     }
