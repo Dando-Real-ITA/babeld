@@ -815,6 +815,76 @@ move_installed_route(struct babel_route *route, int i)
 }
 
 static int
+route_old(struct babel_route *route)
+{
+    return route->time < now.tv_sec - route->hold_time * 7 / 8;
+}
+
+static int
+route_expired(struct babel_route *route)
+{
+    return route->time < now.tv_sec - route->hold_time;
+}
+
+static int
+find_route_slot_for_route(const struct babel_route *route)
+{
+    return find_route_slot(route->src->id,
+                           route->src->prefix, route->src->plen,
+                           route->src->src_prefix, route->src->src_plen,
+                           NULL);
+}
+
+static void
+clear_installed_ranks(const struct babel_route *route, int clear_tables)
+{
+    int i;
+    struct babel_route *head;
+    struct babel_route *r;
+
+    i = find_route_slot_for_route(route);
+    if(i < 0)
+        return;
+
+    head = find_group_head_for_route(i, route, NULL, NULL);
+    if(head == NULL)
+        return;
+
+    r = head;
+    while(r) {
+        r->installed = 0;
+        if(clear_tables)
+            r->installed_table_count = 0;
+        r = r->multipath;
+    }
+}
+
+static int
+metric_to_ecmp_weight(int metric, int min_metric)
+{
+    int base = 5;
+    int numerator;
+    int denominator;
+    int weight;
+
+    if(metric < 0)
+        metric = 0;
+    if(min_metric < 0)
+        min_metric = 0;
+
+    numerator = base * (min_metric + 256);
+    denominator = metric + 256;
+    if(denominator <= 0)
+        denominator = 1;
+
+    weight = numerator / denominator;
+    if(weight < 1)
+        weight = 1;
+    if(weight > 256)
+        weight = 256;
+    return weight;
+}
+
 change_route(int operation, const struct babel_route *route, int metric,
              const unsigned char *new_next_hop,
              int new_ifindex, int new_metric,
