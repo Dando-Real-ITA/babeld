@@ -885,6 +885,104 @@ metric_to_ecmp_weight(int metric, int min_metric)
     return weight;
 }
 
+static int
+collect_multipath_nexthops(const struct babel_route *route,
+                          struct kernel_nexthop *nexthops,
+                          int max_nexthops)
+{
+    int i;
+    int best_metric = INFINITY;
+    int min_metric = INFINITY;
+    int count = 0;
+    int collected_metrics[MAX_ECMP_NEXTHOPS];
+    struct babel_route *head;
+    struct babel_route *r;
+
+    i = find_route_slot(route->src->id,
+                        route->src->prefix, route->src->plen,
+                        route->src->src_prefix, route->src->src_plen,
+                        NULL);
+    if(i < 0)
+        return 0;
+
+    head = find_group_head_for_route(i, route, NULL, NULL);
+    if(head == NULL)
+        return 0;
+
+    r = head;
+    while(r) {
+        int metric;
+        if(route_expired(r) || !route_feasible(r)) {
+            r = r->multipath;
+            continue;
+        }
+
+        metric = route_metric(r);
+        if(metric >= INFINITY) {
+            r = r->multipath;
+            continue;
+        }
+
+        if(metric < best_metric)
+            best_metric = metric;
+
+        r = r->multipath;
+    }
+
+    if(best_metric >= INFINITY)
+        return 0;
+    min_metric = best_metric;
+
+    r = head;
+    while(r && count < max_nexthops) {
+        int metric;
+        int j;
+        int duplicate = 0;
+
+        if(route_expired(r) || !route_feasible(r)) {
+            r = r->multipath;
+            continue;
+        }
+
+        metric = route_metric(r);
+        if(metric >= INFINITY) {
+            r = r->multipath;
+            continue;
+        }
+
+        if(metric > best_metric + ecmp_metric_window) {
+            r = r->multipath;
+            continue;
+        }
+
+        for(j = 0; j < count; j++) {
+            if(nexthops[j].ifindex == r->neigh->ifp->ifindex &&
+               memcmp(nexthops[j].gate, r->nexthop, 16) == 0) {
+                duplicate = 1;
+                break;
+            }
+        }
+
+        if(!duplicate) {
+            memcpy(nexthops[count].gate, r->nexthop, 16);
+            nexthops[count].ifindex = r->neigh->ifp->ifindex;
+            collected_metrics[count] = metric;
+            nexthops[count].weight = 1;
+            count++;
+        }
+
+        r = r->multipath;
+    }
+
+    if(multipath_ecmp == ECMP_WEIGHT) {
+        for(i = 0; i < count; i++)
+            nexthops[i].weight = metric_to_ecmp_weight(collected_metrics[i],
+                                                       min_metric);
+    }
+
+    return count;
+}
+
 change_route(int operation, const struct babel_route *route, int metric,
              const unsigned char *new_next_hop,
              int new_ifindex, int new_metric,

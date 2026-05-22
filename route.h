@@ -48,7 +48,7 @@ struct babel_route {
 #endif
 
 #ifndef DEFAULT_ECMP_METRIC_WINDOW
-#define DEFAULT_ECMP_METRIC_WINDOW 200
+#define DEFAULT_ECMP_METRIC_WINDOW 300
 #endif
 
 /* multipath_ecmp values */
