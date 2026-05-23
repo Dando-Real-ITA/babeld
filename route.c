@@ -1175,6 +1175,9 @@ change_route(int operation, const struct babel_route *route, int metric,
     for(i = 0; i < num_tables; i++) {
         int table = tables_to_use[i];
         int newtable = table;
+        int use_multipath = 0;
+        struct kernel_nexthop nexthops[MAX_ECMP_NEXTHOPS];
+        int nexthop_count = 0;
         
         if(newsrc && new_filter_result.table_count > 0) {
             /* Use corresponding table from new filter result if available */
@@ -1184,13 +1187,43 @@ change_route(int operation, const struct babel_route *route, int metric,
             newtable = table;
         }
 
+        if(multipath_ecmp != ECMP_DISABLED && operation != ROUTE_FLUSH) {
+            nexthop_count = collect_multipath_nexthops(route,
+                                                       nexthops,
+                                                       MAX_ECMP_NEXTHOPS);
+            if(nexthop_count > 1)
+                use_multipath = 1;
+        }
+
         kernel_route_operation_depth++;
-        rc = kernel_route(operation, table, route->src->prefix, route->src->plen,
-                            route->src->src_prefix, route->src->src_plen, pref_src,
-                            route->nexthop, ifindex,
-                            metric, new_next_hop, new_ifindex, new_metric,
-                            operation == ROUTE_MODIFY ? newtable : 0,
-                            newpref_src);
+        if(use_multipath) {
+            rc = kernel_route_multipath(operation,
+                                        table,
+                                        route->src->prefix, route->src->plen,
+                                        route->src->src_prefix, route->src->src_plen,
+                                        pref_src,
+                                        metric,
+                                        newmetric,
+                                        nexthops,
+                                        nexthop_count,
+                                        operation == ROUTE_MODIFY ? newtable : 0,
+                                        newpref_src);
+            if(rc < 0 && errno == ENOSYS) {
+                rc = kernel_route(operation, table, route->src->prefix, route->src->plen,
+                                  route->src->src_prefix, route->src->src_plen, pref_src,
+                                  route->nexthop, ifindex,
+                                  metric, new_next_hop, new_ifindex, newmetric,
+                                  operation == ROUTE_MODIFY ? newtable : 0,
+                                  newpref_src);
+            }
+        } else {
+            rc = kernel_route(operation, table, route->src->prefix, route->src->plen,
+                              route->src->src_prefix, route->src->src_plen, pref_src,
+                              route->nexthop, ifindex,
+                              metric, new_next_hop, new_ifindex, newmetric,
+                              operation == ROUTE_MODIFY ? newtable : 0,
+                              newpref_src);
+        }
 
         kernel_route_operation_depth--;
 
