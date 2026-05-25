@@ -1416,21 +1416,61 @@ void
 change_route_metric(struct babel_route *route,
                     unsigned refmetric, unsigned cost, unsigned add)
 {
-    int old_metric = metric_to_kernel(route_metric(route)),
-        new_metric = metric_to_kernel(MIN(refmetric + cost + add, INFINITY));
+    int oldmetric = metric_to_kernel(route_metric(route)),
+        newmetric = metric_to_kernel(MIN(refmetric + cost + add, INFINITY));
 
-    if(route->installed && old_metric != new_metric) {
+    if(route->installed > 0 && oldmetric != newmetric) {
         int rc;
+
+        if(multipath_ecmp != ECMP_DISABLED) {
+            route_smoothed_metric(route);
+
+            route->refmetric = refmetric;
+            route->cost = cost;
+            route->add_metric = add;
+
+            if(smoothing_half_life == 0) {
+                route->smoothed_metric = route_metric(route);
+                route->smoothed_metric_time = now.tv_sec;
+            }
+
+            debugf("change_route_metric(%s from %s, %d -> %d) [ecmp]\n",
+                   format_prefix(route->src->prefix, route->src->plen),
+                   format_prefix(route->src->src_prefix, route->src->src_plen),
+                   oldmetric, newmetric);
+
+            /* ECMP_WEIGHT: always push new metric weights to kernel.
+               ECMP_EQUAL:  weights are uniform, so only push when the nexthop
+               set changes (join/leave) or for retractions (INFINITY) which
+               are part of the loop-avoidance algorithm and must reach kernel. */
+            if(multipath_ecmp == ECMP_WEIGHT ||
+               newmetric >= KERNEL_INFINITY ||
+               nexthop_set_changed(route)) {
+                rc = change_route(ROUTE_MODIFY, route, oldmetric, route->nexthop,
+                                  route->neigh->ifp->ifindex, newmetric,
+                                  NULL, NULL, NULL);
+                if(rc < 0)
+                    perror("kernel_route(MODIFY metric)");
+            }
+
+            refresh_installed_ranks(route);
+
+            local_notify_route(route, LOCAL_CHANGE);
+            return;
+        }
+
         debugf("change_route_metric(%s from %s, %d -> %d)\n",
                format_prefix(route->src->prefix, route->src->plen),
                format_prefix(route->src->src_prefix, route->src->src_plen),
-               old_metric, new_metric);
-        rc = change_route(ROUTE_MODIFY, route, old_metric, route->nexthop,
-                          route->neigh->ifp->ifindex, new_metric, NULL, NULL, NULL);
+               oldmetric, newmetric);
+           rc = change_route(ROUTE_MODIFY, route, oldmetric, route->nexthop,
+                     route->neigh->ifp->ifindex, newmetric, NULL, NULL, NULL);
         if(rc < 0) {
             perror("kernel_route(MODIFY metric)");
             return;
         }
+
+        refresh_installed_ranks(route);
     }
 
     /* Update route->smoothed_metric using the old metric. */
