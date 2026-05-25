@@ -1247,7 +1247,7 @@ install_route(struct babel_route *route)
 {
     int i, rc;
 
-    if(route->installed)
+    if(route->installed > 0)
         return;
 
     if(!route_feasible(route))
@@ -1275,8 +1275,7 @@ install_route(struct babel_route *route)
         return;
     }
 
-    route->installed = 1;
-    move_installed_route(route, i);
+    refresh_installed_ranks(route);
 
     local_notify_route(route, LOCAL_CHANGE);
 }
@@ -1286,10 +1285,8 @@ uninstall_route(struct babel_route *route)
 {
     int rc;
 
-    if(!route->installed)
+    if(route->installed != 1)
         return;
-
-    route->installed = 0;
 
     debugf("uninstall_route(%s from %s)\n",
            format_prefix(route->src->prefix, route->src->plen),
@@ -1301,7 +1298,7 @@ uninstall_route(struct babel_route *route)
         return;
     }
 
-    route->installed_table_count = 0;
+    clear_installed_ranks(route, 1);
     local_notify_route(route, LOCAL_CHANGE);
 }
 
@@ -1318,7 +1315,7 @@ switch_routes(struct babel_route *old, struct babel_route *new)
         return;
     }
 
-    if(!old->installed)
+    if(old->installed != 1)
         return;
 
     if(!route_feasible(new))
@@ -1337,16 +1334,82 @@ switch_routes(struct babel_route *old, struct babel_route *new)
         return;
     }
 
-    old->installed = 0;
     old->installed_table_count = 0;
-    new->installed = 1;
-    move_installed_route(new, find_route_slot(new->src->id,
-                                              new->src->prefix, new->src->plen,
-                                              new->src->src_prefix,
-                                              new->src->src_plen,
-                                              NULL));
+    refresh_installed_ranks(new);
     local_notify_route(old, LOCAL_CHANGE);
     local_notify_route(new, LOCAL_CHANGE);
+}
+
+/* Returns 1 if the set of (gate, ifindex) pairs that would be passed to the
+   kernel differs from those currently installed (r->installed > 0).
+   Used in ECMP_EQUAL mode to skip kernel FLUSH+ADD when only metrics changed
+   but every nexthop identity is unchanged. */
+static int
+nexthop_set_changed(const struct babel_route *route)
+{
+    struct kernel_nexthop new_nexthops[MAX_ECMP_NEXTHOPS];
+    struct kernel_nexthop old_nexthops[MAX_ECMP_NEXTHOPS];
+    int new_count;
+    int old_count = 0;
+    int slot, i, j;
+    struct babel_route *head;
+    struct babel_route *r;
+
+    new_count = collect_multipath_nexthops(route, new_nexthops, MAX_ECMP_NEXTHOPS);
+
+    slot = find_route_slot_for_route(route);
+    if(slot < 0)
+        return 1;
+
+    head = find_group_head_for_route(slot, route, NULL, NULL);
+    if(head == NULL)
+        return 1;
+
+    /* Build currently installed ECMP (ifindex,gate) set for this group. */
+    r = head;
+    while(r) {
+        if(r->installed > 0) {
+            int duplicate = 0;
+
+            for(j = 0; j < old_count; j++) {
+                if(old_nexthops[j].ifindex == r->neigh->ifp->ifindex &&
+                   memcmp(old_nexthops[j].gate, r->nexthop, 16) == 0) {
+                    duplicate = 1;
+                    break;
+                }
+            }
+
+            if(!duplicate) {
+                if(old_count >= MAX_ECMP_NEXTHOPS)
+                    return 1;
+                memcpy(old_nexthops[old_count].gate, r->nexthop, 16);
+                old_nexthops[old_count].ifindex = r->neigh->ifp->ifindex;
+                old_count++;
+            }
+        }
+        r = r->multipath;
+    }
+
+    if(new_count != old_count)
+        return 1;
+
+    /* Check every new nexthop is present among installed ones. */
+    for(i = 0; i < new_count; i++) {
+        int found = 0;
+
+        for(j = 0; j < old_count; j++) {
+            if(old_nexthops[j].ifindex == new_nexthops[i].ifindex &&
+               memcmp(old_nexthops[j].gate, new_nexthops[i].gate, 16) == 0) {
+                found = 1;
+                break;
+            }
+        }
+
+        if(!found)
+            return 1;
+    }
+
+    return 0;
 }
 
 void
