@@ -1502,18 +1502,6 @@ route_feasible(struct babel_route *route)
     return update_feasible(route->src, route->seqno, route->refmetric);
 }
 
-static int
-route_old(struct babel_route *route)
-{
-    return route->time < now.tv_sec - route->hold_time * 7 / 8;
-}
-
-static int
-route_expired(struct babel_route *route)
-{
-    return route->time < now.tv_sec - route->hold_time;
-}
-
 int
 update_feasible(struct source *src,
                 unsigned short seqno, unsigned short refmetric)
@@ -1600,6 +1588,8 @@ route_acceptable(struct babel_route *route, int feasible,
         return 0;
     if(feasible && !route_feasible(route))
         return 0;
+    if(feasible && route_metric(route) >= INFINITY)
+        return 0;
     if(exclude && route->neigh == exclude)
         return 0;
     return 1;
@@ -1616,25 +1606,42 @@ find_best_route(const unsigned char *id,
                 const unsigned char *src_prefix, unsigned char src_plen,
                 int feasible, struct neighbour *exclude)
 {
-    struct babel_route *route, *r;
+    struct babel_route *route, *head, *r;
     int i = find_route_slot(id, prefix, plen, src_prefix, src_plen, NULL);
 
     if(i < 0)
         return NULL;
 
-    route = routes[i];
-    while(route && !route_acceptable(route, feasible, exclude))
-        route = route->next;
+    route = NULL;
+    head = routes[i];
+    while(head && !route) {
+        r = head;
+        while(r) {
+            if(route_acceptable(r, feasible, exclude) &&
+               (!id || memcmp(r->src->id, id, 8) == 0)) {
+                route = r;
+                break;
+            }
+            r = r->multipath;
+        }
+        head = head->next;
+    }
 
     if(!route)
         return NULL;
 
-    r = route->next;
-    while(r) {
-        if(route_acceptable(r, feasible, exclude) &&
-           (route_smoothed_metric(r) < route_smoothed_metric(route)))
-            route = r;
-        r = r->next;
+    head = routes[i];
+    while(head) {
+        r = head;
+        while(r) {
+            if(r != route &&
+               route_acceptable(r, feasible, exclude) &&
+               (!id || memcmp(r->src->id, id, 8) == 0) &&
+               (route_smoothed_metric(r) < route_smoothed_metric(route)))
+                route = r;
+            r = r->multipath;
+        }
+        head = head->next;
     }
 
     return route;
@@ -1679,11 +1686,15 @@ update_neighbour_metric(struct neighbour *neigh, int changed)
         int i;
 
         for(i = 0; i < route_slots; i++) {
-            struct babel_route *r = routes[i];
-            while(r) {
-                if(r->neigh == neigh)
-                    update_route_metric(r);
-                r = r->next;
+            struct babel_route *head = routes[i];
+            while(head) {
+                struct babel_route *r = head;
+                while(r) {
+                    if(r->neigh == neigh)
+                        update_route_metric(r);
+                    r = r->multipath;
+                }
+                head = head->next;
             }
         }
     }
@@ -1697,11 +1708,15 @@ update_interface_metric(struct interface *ifp)
     int i;
 
     for(i = 0; i < route_slots; i++) {
-        struct babel_route *r = routes[i];
-        while(r) {
-            if(r->neigh->ifp == ifp)
-                update_route_metric(r);
-            r = r->next;
+        struct babel_route *head = routes[i];
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(r->neigh->ifp == ifp)
+                    update_route_metric(r);
+                r = r->multipath;
+            }
+            head = head->next;
         }
     }
 }
@@ -1780,22 +1795,24 @@ update_route(const unsigned char *id,
 
     if(route) {
         struct source *oldsrc;
-        unsigned short oldmetric, oldinstalled;
+        unsigned short oldmetric;
+        int oldinstalled_primary;
         int lost = 0;
 
-        oldinstalled = route->installed;
+        oldinstalled_primary = (route->installed == 1);
         oldsrc = route->src;
         oldmetric = route_metric(route);
 
-          if(refmetric >= INFINITY && hard_retract &&
-              oldinstalled && src == route->src) {
+        if( refmetric >= INFINITY && hard_retract &&
+            oldinstalled_primary && src == route->src) {
+
             route->seqno = seqno;
             route->hold_time = hold_time;
 
             change_route_metric(route,
                                 refmetric, neighbour_cost(neigh), add_metric);
 
-            if(route->installed)
+            if(route->installed == 1)
                 uninstall_route(route);
 
             route_lost_ext(oldsrc, oldmetric, 1);
@@ -1806,7 +1823,7 @@ update_route(const unsigned char *id,
            if it makes a route unfeasible in order to break any routing loops
            in a timely manner.  If the source remains the same, we ignore
            the update. */
-        if(!feasible && route->installed) {
+        if(!feasible && route->installed == 1) {
             debugf("Unfeasible update for installed route to %s "
                    "(%s %d %d -> %s %d %d).\n",
                    format_prefix(src->prefix, src->plen),
@@ -1830,8 +1847,8 @@ update_route(const unsigned char *id,
 
         route_changed(route, oldsrc, oldmetric);
         if(!lost) {
-            lost = oldinstalled &&
-                find_installed_route(oldsrc->id, prefix, plen, src_prefix, src_plen, NULL) == NULL;
+            lost = oldinstalled_primary &&
+                find_installed_route(NULL, prefix, plen, src_prefix, src_plen, NULL) == NULL;
         }
         if(lost)
             route_lost_ext(oldsrc, oldmetric, 0);
@@ -1872,6 +1889,7 @@ update_route(const unsigned char *id,
         route->smoothed_metric = MAX(route_metric(route), INFINITY / 2);
         route->smoothed_metric_time = now.tv_sec;
         route->next = NULL;
+        route->multipath = NULL;
         new_route = insert_route(route);
         if(new_route == NULL) {
             fprintf(stderr, "Couldn't insert route.\n");
