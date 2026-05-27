@@ -37,6 +37,7 @@ struct babel_route {
     unsigned short smoothed_metric; /* for route selection */
     time_t smoothed_metric_time;
     short installed; /* 0: not installed, 1: primary installed, >1: ECMP nexthop rank */
+    unsigned char multipath_ever; /* 1 if this group ever had 2+ nexthops installed */
     int installed_tables[MAX_TABLES_PER_FILTER];  /* Array of kernel routing tables */
     int installed_table_count;                     /* Number of tables route is installed in */
     struct babel_route *next;

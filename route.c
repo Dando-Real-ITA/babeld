@@ -1117,7 +1117,17 @@ refresh_installed_ranks(struct babel_route *route)
 
     if(primary)
         move_installed_route(primary, slot);
-    
+
+    /* If the group now has 2+ nexthops, taint every member so that when it
+       later shrinks back to 1 it stays in multipath encoding. */
+    if(count > 1) {
+        r = head;
+        while(r) {
+            r->multipath_ever = 1;
+            r = r->multipath;
+        }
+    }
+
     /* Detect if transitioning from single path or different multipath set */
     if(old_nexthop_count != count) {
         set_changed = 1;
@@ -1300,7 +1310,10 @@ change_route(int operation, const struct babel_route *route, int metric,
             nexthop_count = collect_multipath_nexthops(route,
                                                        nexthops,
                                                        MAX_ECMP_NEXTHOPS);
-            if(nexthop_count > 1)
+            /* Use multipath encoding if: more than 1 nexthop now, OR the
+               group was ever multipath (tainted) and still has >=1 nexthop.
+               Simple routes that never had >1 nexthop keep normal encoding. */
+            if(nexthop_count > 1 || (nexthop_count == 1 && route->multipath_ever))
                 use_multipath = 1;
         }
         
@@ -1320,7 +1333,11 @@ change_route(int operation, const struct babel_route *route, int metric,
                         r = r->multipath;
                     }
                     
-                    int currently_multipath = currently_installed_count > 1;
+                    /* Currently multipath if >1 installed, OR tainted with >=1.
+                       Mirrors the use_multipath logic above. */
+                    int currently_multipath =
+                        currently_installed_count > 1 ||
+                        (currently_installed_count == 1 && route->multipath_ever);
                     int will_be_multipath = use_multipath;
                     
                     /* If transitioning between single↔multipath, use FLUSH+ADD */
