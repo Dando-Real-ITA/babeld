@@ -1004,6 +1004,7 @@ refresh_installed_ranks(struct babel_route *route)
     struct babel_route *head;
     struct babel_route *r;
     struct babel_route *primary = NULL;
+    struct babel_route *old_primary = NULL;
     struct kernel_nexthop nexthops[MAX_ECMP_NEXTHOPS];
     struct kernel_nexthop old_nexthops[MAX_ECMP_NEXTHOPS];
     int old_nexthop_count = 0;
@@ -1022,6 +1023,9 @@ refresh_installed_ranks(struct babel_route *route)
         r = head;
         while(r) {
             if(r->installed > 0) {
+                if(r->installed == 1 && old_primary == NULL)
+                    old_primary = r;
+
                 int duplicate = 0;
                 for(int j = 0; j < old_nexthop_count; j++) {
                     if(old_nexthops[j].ifindex == r->neigh->ifp->ifindex &&
@@ -1136,13 +1140,37 @@ refresh_installed_ranks(struct babel_route *route)
     }
 
 update_kernel_if_needed:
-    /* If ECMP set changed, notify kernel via the primary installed route */
+    /* If ECMP set changed, reprogram kernel route regardless of metric delta. */
     if(set_changed && primary && route_metric(primary) < INFINITY) {
-        debugf("ECMP set changed for %s/%u: notifying kernel\n",
+        int rc;
+        int metric;
+
+        debugf("ECMP set changed for %s/%u: reprogramming kernel\n",
                format_prefix(route->src->prefix, route->src->plen),
                route->src->plen);
-        /* This will collect the new ECMP nexthops and update kernel accordingly */
-        change_route_metric(primary, primary->refmetric, primary->cost, primary->add_metric);
+
+        if(old_primary && old_primary->installed_table_count > 0) {
+            rc = change_route(ROUTE_FLUSH,
+                              old_primary,
+                              metric_to_kernel(route_metric(old_primary)),
+                              NULL, 0, 0,
+                              NULL, NULL, NULL);
+            if(rc < 0 && errno != ESRCH && errno != ENOENT)
+                perror("kernel_route(FLUSH ecmp refresh)");
+
+            old_primary->installed_table_count = 0;
+        }
+
+        metric = metric_to_kernel(route_metric(primary));
+        rc = change_route(ROUTE_ADD,
+                          primary,
+                          metric,
+                          NULL, 0, 0,
+                          NULL,
+                          primary->installed_tables,
+                          &primary->installed_table_count);
+        if(rc < 0 && errno != EEXIST)
+            perror("kernel_route(ADD ecmp refresh)");
     }
 }
 
