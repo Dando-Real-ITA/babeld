@@ -1909,10 +1909,10 @@ send_unfeasible_request(struct neighbour *neigh, int force,
                         unsigned short seqno, unsigned short metric,
                         struct source *src)
 {
-    struct babel_route *route = find_installed_route(src->id,
-                                                     src->prefix, src->plen,
-                                                     src->src_prefix, src->src_plen,
-                                                     NULL);
+    struct babel_route *route = find_best_route(src->id,
+                                                src->prefix, src->plen,
+                                                src->src_prefix, src->src_plen,
+                                                0, NULL);
 
     if(seqno_minus(src->seqno, seqno) > 100) {
         /* Probably a source that lost its seqno.  Let it time-out. */
@@ -1940,7 +1940,7 @@ consider_route(struct babel_route *route)
     struct babel_route *installed;
     struct xroute *xroute;
 
-    if(route->installed)
+    if(route->installed == 1)
         return;
 
     if(!route_feasible(route))
@@ -1951,7 +1951,7 @@ consider_route(struct babel_route *route)
     if(xroute && (allow_duplicates < 0 || xroute->metric >= allow_duplicates))
         return;
 
-    installed = find_installed_route(route->src->id,
+    installed = find_installed_route(NULL,
                                      route->src->prefix, route->src->plen,
                                      route->src->src_prefix, route->src->src_plen,
                                      NULL);
@@ -1969,11 +1969,27 @@ consider_route(struct babel_route *route)
        route_smoothed_metric(installed) > route_smoothed_metric(route))
         goto install;
 
+    if(multipath_ecmp != ECMP_DISABLED &&
+       route_metric(installed) < INFINITY &&
+       route_metric(route) < INFINITY) {
+        int oldm = metric_to_kernel(route_metric(installed));
+        int rc;
+        rc = change_route(ROUTE_MODIFY, installed, oldm,
+                          installed->nexthop,
+                          installed->neigh->ifp->ifindex,
+                          oldm,
+                          NULL, NULL, NULL);
+        if(rc < 0)
+            perror("kernel_route(MODIFY ecmp refresh)");
+        else
+            refresh_installed_ranks(installed);
+    }
+
     return;
 
  install:
     switch_routes(installed, route);
-    if(installed && route->installed)
+    if(installed && route->installed == 1)
         send_triggered_update(route, installed->src, route_metric(installed));
     else
         send_update(NULL, 1, route->src->prefix, route->src->plen,
