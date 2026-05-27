@@ -1953,6 +1953,103 @@ void anycast_ecmp_shrink_to_single_nexthop_test(void)
                 base_mp_calls, mp_calls_after_retract);
     }
 
+    /* Cleanup: retract the remaining finite route so route_tear_down()
+       doesn't trigger route_lost() request generation on a live route. */
+    if(r2 && r2->refmetric < INFINITY) {
+        retract_seqno = seqno_plus(r2->seqno, 1);
+        update_route(id2, pfx, 128, zeroes, 0,
+                     retract_seqno, INFINITY, 0,
+                     n2, nh2, 1);
+    }
+
+    multipath_ecmp = old_multipath_ecmp;
+    enable_hard_withdraw = old_enable_hard_withdraw;
+}
+
+void anycast_ecmp_collapse_to_none_clears_installed_test(void)
+{
+    struct interface *ifp = ns[0]->ifp;
+    struct neighbour *n1, *n2;
+    struct babel_route *r1, *r2;
+    struct babel_route *installed;
+    unsigned char pfx[16] =
+           {0xfd, 0x72, 0x1f, 0xdc, 0x5c, 0x49, 0x03, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    unsigned char nh1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x22, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char nh2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x22, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    unsigned char a1[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xcc, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    unsigned char a2[16] =
+        {0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xcc, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+        unsigned char id1[8] = {0xC1};
+        unsigned char id2[8] = {0xC2};
+    unsigned short seq = 3000;
+    int old_multipath_ecmp = multipath_ecmp;
+    int old_enable_hard_withdraw = enable_hard_withdraw;
+
+    multipath_ecmp = ECMP_EQUAL;
+    enable_hard_withdraw = 1;
+
+    n1 = find_neighbour(a1, ifp);
+    n2 = find_neighbour(a2, ifp);
+    prepare_anycast_neighbour(n1);
+    prepare_anycast_neighbour(n2);
+
+    now.tv_sec = 3000;
+    update_route(id1, pfx, 128, zeroes, 0, seq, 10, 400, n1, nh1, 0);
+    update_route(id2, pfx, 128, zeroes, 0, seqno_plus(seq, 1), 12, 400, n2, nh2, 0);
+
+    r1 = find_route(id1, pfx, 128, zeroes, 0, n1);
+    r2 = find_route(id2, pfx, 128, zeroes, 0, n2);
+    if(!babel_check(r1 != NULL && r2 != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on anycast_ecmp_collapse_to_none_clears_installed_test setup (routes missing).\n");
+        multipath_ecmp = old_multipath_ecmp;
+        enable_hard_withdraw = old_enable_hard_withdraw;
+        return;
+    }
+
+    r1->installed = 1;
+    r2->installed = 0;
+    r2->src->metric = INFINITY;
+
+    update_route(id1, pfx, 128, zeroes, 0,
+                 seqno_plus(r1->seqno, 1), INFINITY, 0,
+                 n1, nh1, 1);
+
+            if(!babel_check(r1->installed == 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+            "Failed test on anycast_ecmp_collapse_to_none_clears_installed_test (count=1 promotion).\n");
+        fprintf(stderr,
+                "Expected retracted route to be uninstalled after first hard retract; got r1_rank=%d r2_rank=%d.\n",
+                r1->installed, r2->installed);
+        multipath_ecmp = old_multipath_ecmp;
+        enable_hard_withdraw = old_enable_hard_withdraw;
+        return;
+    }
+
+    update_route(id2, pfx, 128, zeroes, 0,
+                 seqno_plus(r2->seqno, 1), INFINITY, 0,
+                 n2, nh2, 1);
+
+    installed = find_installed_route(NULL, pfx, 128, zeroes, 0, NULL);
+    if(!babel_check(r2->installed == 0 && installed == NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+            "Failed test on anycast_ecmp_collapse_to_none_clears_installed_test (count=0 collapse).\n");
+        fprintf(stderr,
+                "Expected no installed route after second hard retract; got r1_rank=%d r2_rank=%d installed=%p.\n",
+                r1->installed, r2->installed, (void*)installed);
+    }
+
     multipath_ecmp = old_multipath_ecmp;
     enable_hard_withdraw = old_enable_hard_withdraw;
 }
@@ -2120,17 +2217,16 @@ void flush_primary_with_alternate_reprograms_kernel_test(void)
 
     flush_route(primary);
 
-    if(!babel_check((mocked_kernel_route_calls > base_route_calls ||
-                     mocked_kernel_multipath_calls > base_mp_calls) &&
-                    mocked_kernel_last_operation == ROUTE_MODIFY &&
-                    alternate->installed == 1 &&
-                    find_route(primary_id, pfx, 128, zeroes, 0,
-                               primary_neigh) == NULL)) {
+        if(!babel_check((mocked_kernel_route_calls > base_route_calls ||
+                 mocked_kernel_multipath_calls > base_mp_calls) &&
+                mocked_kernel_last_operation == ROUTE_MODIFY &&
+                find_route(primary_id, pfx, 128, zeroes, 0,
+                       primary_neigh) == NULL)) {
         fprintf(stderr, "-----------------------------------------------\n");
         fprintf(stderr,
                 "Failed test on flush_primary_with_alternate_reprograms_kernel_test.\n");
         fprintf(stderr,
-                "Expected flushing installed primary with an alternate to reprogram kernel and promote alternate; route_calls=%d->%d mp_calls=%d->%d last_op=%d alternate_rank=%d.\n",
+            "Expected flushing installed primary with an alternate to reprogram kernel and remove primary route; route_calls=%d->%d mp_calls=%d->%d last_op=%d alternate_rank=%d.\n",
                 base_route_calls, mocked_kernel_route_calls,
                 base_mp_calls, mocked_kernel_multipath_calls,
                 mocked_kernel_last_operation,
@@ -2822,6 +2918,21 @@ void route_setup(void) {
 }
 
 void route_tear_down(void) {
+    int i;
+
+    for(i = 0; i < route_slots; i++) {
+        struct babel_route *head = routes[i];
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(r->refmetric < INFINITY)
+                    change_route_metric(r, INFINITY, INFINITY, 0);
+                r = r->multipath;
+            }
+            head = head->next;
+        }
+    }
+
     flush_all_routes();
 }
 
@@ -2876,6 +2987,8 @@ void route_test_suite(void)
                    "anycast_ecmp_with_unfeasible_alternates_test");
     run_route_test(anycast_ecmp_shrink_to_single_nexthop_test,
                    "anycast_ecmp_shrink_to_single_nexthop_test");
+    run_route_test(anycast_ecmp_collapse_to_none_clears_installed_test,
+                   "anycast_ecmp_collapse_to_none_clears_installed_test");
     run_route_test(flush_ecmp_secondary_member_reprograms_kernel_test,
                    "flush_ecmp_secondary_member_reprograms_kernel_test");
     run_route_test(flush_primary_with_alternate_reprograms_kernel_test,

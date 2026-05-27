@@ -2003,17 +2003,21 @@ retract_neighbour_routes(struct neighbour *neigh)
     int i;
 
     for(i = 0; i < route_slots; i++) {
-        struct babel_route *r = routes[i];
-        while(r) {
-            if(r->neigh == neigh) {
-                if(r->refmetric != INFINITY) {
-                    unsigned short oldmetric = route_metric(r);
-                    retract_route(r);
-                    if(oldmetric != INFINITY)
-                        route_changed(r, r->src, oldmetric);
+        struct babel_route *head = routes[i];
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(r->neigh == neigh) {
+                    if(r->refmetric != INFINITY) {
+                        unsigned short oldmetric = route_metric(r);
+                        retract_route(r);
+                        if(oldmetric != INFINITY)
+                            route_changed(r, r->src, oldmetric);
+                    }
                 }
+                r = r->multipath;
             }
-            r = r->next;
+            head = head->next;
         }
     }
 }
@@ -2026,7 +2030,7 @@ send_triggered_update(struct babel_route *route, struct source *oldsrc,
     /* 1 means send speedily, 2 means resend */
     int urgent;
 
-    if(!route->installed)
+    if(route->installed != 1)
         return;
 
     newmetric = route_metric(route);
@@ -2079,11 +2083,11 @@ void
 route_changed(struct babel_route *route,
               struct source *oldsrc, unsigned short oldmetric)
 {
-    if(route->installed) {
+    if(route->installed == 1) {
         struct babel_route *better_route;
         /* Do this unconditionally -- microoptimisation is not worth it. */
         better_route =
-            find_best_route(route->src->id,
+            find_best_route(NULL,
                             route->src->prefix, route->src->plen,
                             route->src->src_prefix, route->src->src_plen,
                             1, NULL);
@@ -2091,7 +2095,7 @@ route_changed(struct babel_route *route,
             consider_route(better_route);
     }
 
-    if(route->installed) {
+    if(route->installed == 1) {
         /* We didn't change routes after all. */
         send_triggered_update(route, oldsrc, oldmetric);
     } else {
@@ -2106,15 +2110,52 @@ void
 route_lost_ext(struct source *src, unsigned oldmetric, int hard_retract)
 {
     struct babel_route *new_route;
+    struct babel_route *installed;
 
     hard_retract = hard_retract && enable_hard_withdraw;
 
-    new_route = find_best_route(src->id,
-                                src->prefix, src->plen,
-                                src->src_prefix, src->src_plen, 1, NULL);
-    if(new_route && route_feasible(new_route) &&
-       (!hard_retract || route_metric(new_route) < INFINITY)) {
-        consider_route(new_route);
+    if(hard_retract) {
+        int i;
+        struct babel_route *r;
+
+        new_route = NULL;
+        i = find_route_slot(NULL,
+                            src->prefix, src->plen,
+                            src->src_prefix, src->src_plen,
+                            NULL);
+        if(i >= 0) {
+            struct babel_route *head = routes[i];
+            while(head) {
+                r = head;
+                while(r) {
+                    if(!route_expired(r) && route_feasible(r) &&
+                       route_metric(r) < INFINITY &&
+                       (!new_route || route_metric(r) < route_metric(new_route)))
+                        new_route = r;
+                    r = r->multipath;
+                }
+                head = head->next;
+            }
+        }
+    } else {
+        new_route = find_best_route(NULL,
+                                    src->prefix, src->plen,
+                                    src->src_prefix, src->src_plen,
+                                    1,
+                                    NULL);
+    }
+    if(new_route &&
+       ((hard_retract && route_metric(new_route) < INFINITY) ||
+        (!hard_retract && route_feasible(new_route)))) {
+        if(hard_retract) {
+            installed = find_installed_route(NULL,
+                                             src->prefix, src->plen,
+                                             src->src_prefix, src->src_plen,
+                                             NULL);
+            switch_routes(installed, new_route);
+        } else {
+            consider_route(new_route);
+        }
     } else if(oldmetric < INFINITY) {
         /* Avoid creating a blackhole. */
         if(hard_retract) {
@@ -2157,24 +2198,26 @@ expire_routes(void)
 
     i = 0;
     while(i < route_slots) {
-        r = routes[i];
-        while(r) {
-            /* Protect against clock being stepped. */
-            if(r->time > now.tv_sec || route_old(r)) {
-                flush_route(r);
-                goto again;
-            }
+        struct babel_route *head = routes[i];
+        while(head) {
+            r = head;
+            while(r) {
+                if(r->time > now.tv_sec || route_old(r)) {
+                    flush_route(r);
+                    goto again;
+                }
 
-            update_route_metric(r);
+                update_route_metric(r);
 
-            if(r->installed && r->refmetric < INFINITY) {
-                if(route_old(r))
-                    /* Route about to expire, send a request. */
-                    send_unicast_request(r->neigh,
-                                         r->src->prefix, r->src->plen,
-                                         r->src->src_prefix, r->src->src_plen);
+                if(r->installed && r->refmetric < INFINITY) {
+                    if(route_old(r))
+                        send_unicast_request(r->neigh,
+                                             r->src->prefix, r->src->plen,
+                                             r->src->src_prefix, r->src->src_plen);
+                }
+                r = r->multipath;
             }
-            r = r->next;
+            head = head->next;
         }
         i++;
     again:
