@@ -1354,6 +1354,32 @@ switch_routes(struct babel_route *old, struct babel_route *new)
     local_notify_route(new, LOCAL_CHANGE);
 }
 
+/* Returns the count of installed nexthops for this route's group.
+   Used to detect if transitioning between single↔multipath. */
+static int
+count_installed_nexthops(const struct babel_route *route)
+{
+    int slot, count = 0;
+    struct babel_route *head, *r;
+
+    slot = find_route_slot_for_route(route);
+    if(slot < 0)
+        return 0;
+
+    head = find_group_head_for_route(slot, route, NULL, NULL);
+    if(head == NULL)
+        return 0;
+
+    r = head;
+    while(r) {
+        if(r->installed > 0)
+            count++;
+        r = r->multipath;
+    }
+
+    return count;
+}
+
 /* Returns 1 if the set of (gate, ifindex) pairs that would be passed to the
    kernel differs from those currently installed (r->installed > 0).
    Used in ECMP_EQUAL mode to skip kernel FLUSH+ADD when only metrics changed
@@ -1460,12 +1486,32 @@ change_route_metric(struct babel_route *route,
             if(multipath_ecmp == ECMP_WEIGHT ||
                newmetric >= KERNEL_INFINITY ||
                nexthop_set_changed(route)) {
-                rc = change_route(ROUTE_MODIFY, route, oldmetric, route->nexthop,
-                                  route->neigh->ifp->ifindex, newmetric,
-                                  NULL, NULL, NULL);
-                if(rc < 0)
-                    perror("kernel_route(MODIFY metric)");
+                int nexthop_count = collect_multipath_nexthops(route, NULL, 0);
+                int was_multipath = count_installed_nexthops(route) > 1;
+                int will_be_multipath = nexthop_count > 1;
+                
+                /* If transitioning between single↔multipath, must FLUSH+ADD
+                   because kernel can't MODIFY a route between single/multipath modes */
+                if(was_multipath != will_be_multipath) {
+                    rc = change_route(ROUTE_FLUSH, route, oldmetric, route->nexthop,
+                                      route->neigh->ifp->ifindex, 0,
+                                      NULL, NULL, NULL);
+                    if(rc < 0)
+                        perror("kernel_route(FLUSH for multipath transition)");
+                    
+                    rc = change_route(ROUTE_ADD, route, 0, NULL, 0, newmetric,
+                                      NULL, route->installed_tables, &route->installed_table_count);
+                    if(rc < 0)
+                        perror("kernel_route(ADD for multipath transition)");
+                } else {
+                    rc = change_route(ROUTE_MODIFY, route, oldmetric, route->nexthop,
+                                      route->neigh->ifp->ifindex, newmetric,
+                                      NULL, NULL, NULL);
+                    if(rc < 0)
+                        perror("kernel_route(MODIFY metric)");
+                }
             }
+
 
             refresh_installed_ranks(route);
 
