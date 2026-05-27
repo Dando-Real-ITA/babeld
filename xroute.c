@@ -371,11 +371,7 @@ flush_xroute_ext(struct xroute *xroute, int send_updates, int hard_withdraw)
                                            myseqno, myid,
                                            UPDATE_FLAG_HARD_WITHDRAW);
             } else {
-                send_update_resend_with_id(NULL,
-                                           prefix, plen,
-                                           src_prefix, src_plen,
-                                           myseqno, myid,
-                                           0);
+                send_update_resend(NULL, prefix, plen, src_prefix, src_plen);
             }
             send_covered_xroute_updates(prefix, plen, src_prefix, src_plen);
         }

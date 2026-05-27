@@ -1310,17 +1310,10 @@ kernel_route_multipath(int operation, int table,
         ifindex = nexthops[0].ifindex;
     }
 
-    if(nexthop_count <= 1) {
-        return kernel_route(operation, table,
-                            dest, plen,
-                            src, src_plen,
-                            pref_src,
-                            gate, ifindex, metric,
-                            gate, ifindex,
-                            operation == ROUTE_MODIFY ? newmetric : metric,
-                            newtable, newpref_src);
-    }
-
+    /* MODIFY always requires FLUSH+ADD to correctly transition between any
+       nexthop counts (single↔multipath).  The kernel cannot change a
+       multipath route to single-hop with a plain RTM_NEWROUTE replace, and
+       vice-versa. */
     if(operation == ROUTE_MODIFY) {
         kernel_route_multipath(ROUTE_FLUSH, table,
                                dest, plen,
@@ -1338,6 +1331,20 @@ kernel_route_multipath(int operation, int table,
                                       0, NULL);
     }
 
+    /* For non-MODIFY operations with at most 1 nexthop, fall back to the
+       regular single-hop kernel_route path. */
+    if(nexthop_count <= 1) {
+        return kernel_route(operation, table,
+                            dest, plen,
+                            src, src_plen,
+                            pref_src,
+                            gate, ifindex, metric,
+                            gate, ifindex,
+                            metric,
+                            newtable, newpref_src);
+    }
+
+    /* For FLUSH with >1 nexthops, use the first nexthop to identify the route. */
     if(operation == ROUTE_FLUSH) {
         return kernel_route(operation, table,
                             dest, plen,
