@@ -59,6 +59,20 @@ kernel_route_operation_in_progress(void)
     return kernel_route_operation_depth > 0;
 }
 
+const char *
+route_ecmp_mode(int ecmp_mode)
+{
+    switch(ecmp_mode) {
+    case ECMP_EQUAL:
+        return "equal";
+    case ECMP_WEIGHT:
+        return "weight";
+    case ECMP_DISABLED:
+    default:
+        return "disabled";
+    }
+}
+
 /* We maintain a list of "slots", ordered by prefix.  Every slot
    contains a linked list of the routes to this prefix, with the
    installed route, if any, at the head of the list. */

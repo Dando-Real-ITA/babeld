@@ -340,12 +340,13 @@ local_notify_route_1(struct local_socket *s, struct babel_route *route, int kind
         snprintf(weight_buf, sizeof(weight_buf), "-");
 
     rc = snprintf(buf, sizeof(buf),
-                  "%s route %lx prefix %s from %s installed %s tables %s "
+                  "%s route %lx prefix %s from %s installed %s ecmp %s tables %s "
                   "id %s metric %d refmetric %d installed_rank %d weight %s via %s if %s\n",
                   local_kind(kind),
                   (unsigned long)route,
                   dst_prefix, src_prefix,
                   route->installed ? "yes" : "no",
+                  route_ecmp_mode(multipath_ecmp),
                   tables_buf,
                   format_eui64(route->src->id),
                   route_metric(route), route->refmetric,
@@ -387,8 +388,9 @@ local_notify_status_1(struct local_socket *s, int kind)
     when = time(NULL);
 
     rc = snprintf(buf, sizeof(buf),
-                  "%s daemon version %s my-id %s my-seqno %u at %s\n",
+                  "%s daemon version %s ecmp %s window %d my-id %s my-seqno %u at %s\n",
                   local_kind(kind), BABELD_VERSION,
+                  route_ecmp_mode(multipath_ecmp), ecmp_metric_window,
                   format_eui64(myid), (unsigned int)myseqno,
                   local_dump_timestamp(when, time_buf, sizeof(time_buf)));
     if(rc < 0 || rc >= (int)sizeof(buf))
@@ -581,8 +583,9 @@ local_header(struct local_socket *s)
         strncpy(host, "alamakota", 64);
 
     rc = snprintf(buf, 512,
-                  "BABEL 1.0\nversion %s\nhost %s\nmy-id %s\nmy-seqno %u\nok\n",
-                  BABELD_VERSION, host, format_eui64(myid),
+                  "BABEL 1.0\nversion %s\necmp %s\necmp-metric-window %d\nhost %s\nmy-id %s\nmy-seqno %u\nok\n",
+                  BABELD_VERSION, route_ecmp_mode(multipath_ecmp),
+                  ecmp_metric_window, host, format_eui64(myid),
                   (unsigned int)myseqno);
     if(rc < 0 || rc >= 512)
         goto fail;

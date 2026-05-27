@@ -68,6 +68,8 @@ extern int route_slots;
 extern int smoothing_half_life;
 extern int two_to_the_one_over_hl; /* 2^(1/hl) * 0x10000 */
 
+const char *route_ecmp_mode(int ecmp_mode);
+
 static inline int
 route_metric(const struct babel_route *route)
 {

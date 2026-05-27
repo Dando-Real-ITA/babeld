@@ -1103,7 +1103,7 @@ dump_route(FILE *out, struct babel_route *route)
         snprintf(weight_buf, sizeof(weight_buf), "-");
 
     fprintf(out, "%s from %s metric %d (%d) refmetric %d id %s "
-            "seqno %d age %d via %s neigh %s%s%s%s tables %s installed-rank %d weight %s\n",
+            "seqno %d age %d via %s neigh %s%s%s%s ecmp %s tables %s installed-rank %d weight %s\n",
             format_prefix(route->src->prefix, route->src->plen),
             format_prefix(route->src->src_prefix, route->src->src_plen),
             route_metric(route), route_smoothed_metric(route), route->refmetric,
@@ -1116,6 +1116,7 @@ dump_route(FILE *out, struct babel_route *route)
             nexthop ? format_address(nexthop) : "",
             route->installed ? " (installed)" :
             route_feasible(route) ? " (feasible)" : "",
+            route_ecmp_mode(multipath_ecmp),
             tables_buf,
             route->installed,
             weight_buf);
@@ -1166,7 +1167,9 @@ dump_tables(FILE *out)
 
     when = time(NULL);
 
-    fprintf(out, "Daemon version %s\n", BABELD_VERSION);
+        fprintf(out, "Daemon version %s\n", BABELD_VERSION);
+        fprintf(out, "ECMP mode %s window %d\n",
+            route_ecmp_mode(multipath_ecmp), ecmp_metric_window);
     fprintf(out, "My id %s seqno %d at %s\n",
             format_eui64(myid), myseqno,
             dump_timestamp(when, time_buf, sizeof(time_buf)));
