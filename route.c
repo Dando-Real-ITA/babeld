@@ -1005,6 +1005,9 @@ refresh_installed_ranks(struct babel_route *route)
     struct babel_route *r;
     struct babel_route *primary = NULL;
     struct kernel_nexthop nexthops[MAX_ECMP_NEXTHOPS];
+    struct kernel_nexthop old_nexthops[MAX_ECMP_NEXTHOPS];
+    int old_nexthop_count = 0;
+    int set_changed = 0;
 
     slot = find_route_slot_for_route(route);
     if(slot < 0)
@@ -1013,6 +1016,29 @@ refresh_installed_ranks(struct babel_route *route)
     head = find_group_head_for_route(slot, route, NULL, NULL);
     if(head == NULL)
         return;
+
+    /* Record currently installed nexthops before refresh */
+    if(multipath_ecmp != ECMP_DISABLED) {
+        r = head;
+        while(r) {
+            if(r->installed > 0) {
+                int duplicate = 0;
+                for(int j = 0; j < old_nexthop_count; j++) {
+                    if(old_nexthops[j].ifindex == r->neigh->ifp->ifindex &&
+                       memcmp(old_nexthops[j].gate, r->nexthop, 16) == 0) {
+                        duplicate = 1;
+                        break;
+                    }
+                }
+                if(!duplicate && old_nexthop_count < MAX_ECMP_NEXTHOPS) {
+                    memcpy(old_nexthops[old_nexthop_count].gate, r->nexthop, 16);
+                    old_nexthops[old_nexthop_count].ifindex = r->neigh->ifp->ifindex;
+                    old_nexthop_count++;
+                }
+            }
+            r = r->multipath;
+        }
+    }
 
     r = head;
     while(r) {
@@ -1032,7 +1058,11 @@ refresh_installed_ranks(struct babel_route *route)
             route->installed = 1;
             move_installed_route(route, slot);
         }
-        return;
+        /* If we had installed nexthops before and now have none, kernel needs update */
+        if(old_nexthop_count > 0 && route_metric(route) < INFINITY) {
+            set_changed = 1;
+        }
+        goto update_kernel_if_needed;
     }
 
     if(count == 1) {
@@ -1056,7 +1086,12 @@ refresh_installed_ranks(struct babel_route *route)
 
         if(primary)
             move_installed_route(primary, slot);
-        return;
+        
+        /* Detect if transitioning from multipath to single path */
+        if(old_nexthop_count > 1) {
+            set_changed = 1;
+        }
+        goto update_kernel_if_needed;
     }
 
     for(i = 0; i < count; i++) {
@@ -1078,7 +1113,39 @@ refresh_installed_ranks(struct babel_route *route)
 
     if(primary)
         move_installed_route(primary, slot);
+    
+    /* Detect if transitioning from single path or different multipath set */
+    if(old_nexthop_count != count) {
+        set_changed = 1;
+    } else if(old_nexthop_count > 1) {
+        /* Check if the multipath members changed */
+        for(i = 0; i < count; i++) {
+            int found = 0;
+            for(int j = 0; j < old_nexthop_count; j++) {
+                if(nexthops[i].ifindex == old_nexthops[j].ifindex &&
+                   memcmp(nexthops[i].gate, old_nexthops[j].gate, 16) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            if(!found) {
+                set_changed = 1;
+                break;
+            }
+        }
+    }
+
+update_kernel_if_needed:
+    /* If ECMP set changed, notify kernel via the primary installed route */
+    if(set_changed && primary && route_metric(primary) < INFINITY) {
+        debugf("ECMP set changed for %s/%u: notifying kernel\n",
+               format_prefix(route->src->prefix, route->src->plen),
+               route->src->plen);
+        /* This will collect the new ECMP nexthops and update kernel accordingly */
+        change_route_metric(primary, primary->refmetric, primary->cost, primary->add_metric);
+    }
 }
+
 
 int
 route_ecmp_weight(struct babel_route *route)
@@ -1207,6 +1274,114 @@ change_route(int operation, const struct babel_route *route, int metric,
                                                        MAX_ECMP_NEXTHOPS);
             if(nexthop_count > 1)
                 use_multipath = 1;
+        }
+        
+        /* For MODIFY operations in ECMP mode: detect single↔multipath transitions
+           which the kernel can't handle with MODIFY alone. Convert to FLUSH+ADD. */
+        if(operation == ROUTE_MODIFY && multipath_ecmp != ECMP_DISABLED) {
+            int slot = find_route_slot_for_route(route);
+            if(slot >= 0) {
+                struct babel_route *head = find_group_head_for_route(slot, route, NULL, NULL);
+                if(head != NULL) {
+                    /* Count how many nexthops are currently installed */
+                    int currently_installed_count = 0;
+                    struct babel_route *r = head;
+                    while(r) {
+                        if(r->installed > 0)
+                            currently_installed_count++;
+                        r = r->multipath;
+                    }
+                    
+                    int currently_multipath = currently_installed_count > 1;
+                    int will_be_multipath = use_multipath;
+                    
+                    /* If transitioning between single↔multipath, use FLUSH+ADD */
+                    if(currently_multipath != will_be_multipath) {
+                        kernel_route_operation_depth++;
+
+                        debugf("Multipath mode transition: %s → %s for %s/%u\n",
+                               currently_multipath ? "multipath" : "single",
+                               will_be_multipath ? "multipath" : "single",
+                               format_prefix(route->src->prefix, route->src->plen),
+                               route->src->plen);
+                        
+                        /* FLUSH the old mode */
+                        int flush_rc;
+                        if(currently_multipath) {
+                            flush_rc = kernel_route_multipath(ROUTE_FLUSH,
+                                                             table,
+                                                             route->src->prefix, route->src->plen,
+                                                             route->src->src_prefix, route->src->src_plen,
+                                                             pref_src,
+                                                             metric, 0,
+                                                             nexthops, currently_installed_count,
+                                                             0, newpref_src);
+                            if(flush_rc < 0 && errno == ENOSYS) {
+                                flush_rc = kernel_route(ROUTE_FLUSH, table, 
+                                                       route->src->prefix, route->src->plen,
+                                                       route->src->src_prefix, route->src->src_plen, 
+                                                       pref_src,
+                                                       route->nexthop, ifindex,
+                                                       metric, NULL, 0, 0, 0, newpref_src);
+                            }
+                        } else {
+                            flush_rc = kernel_route(ROUTE_FLUSH, table, 
+                                                   route->src->prefix, route->src->plen,
+                                                   route->src->src_prefix, route->src->src_plen,
+                                                   pref_src,
+                                                   route->nexthop, ifindex,
+                                                   metric, NULL, 0, 0, 0, newpref_src);
+                        }
+                        
+                        if(flush_rc < 0 && errno != ESRCH && errno != ENOENT && errno != EEXIST) {
+                            /* Log unexpected errors, but continue to ADD in new mode */
+                            debugf("warning: FLUSH for transition failed: %s\n", strerror(errno));
+                        }
+                        
+                        /* ADD in the new mode */
+                        if(will_be_multipath) {
+                            rc = kernel_route_multipath(ROUTE_ADD,
+                                                       table,
+                                                       route->src->prefix, route->src->plen,
+                                                       route->src->src_prefix, route->src->src_plen,
+                                                       pref_src,
+                                                       0, newmetric,
+                                                       nexthops, nexthop_count,
+                                                       newtable, newpref_src);
+                            if(rc < 0 && errno == ENOSYS) {
+                                rc = kernel_route(ROUTE_ADD, table, 
+                                                 route->src->prefix, route->src->plen,
+                                                 route->src->src_prefix, route->src->src_plen,
+                                                 pref_src,
+                                                 route->nexthop, ifindex,
+                                                 0, new_next_hop, new_ifindex,
+                                                 newmetric, newtable, newpref_src);
+                            }
+                        } else {
+                            rc = kernel_route(ROUTE_ADD, table,
+                                             route->src->prefix, route->src->plen,
+                                             route->src->src_prefix, route->src->src_plen,
+                                             pref_src,
+                                             route->nexthop, ifindex,
+                                             0, new_next_hop, new_ifindex,
+                                             newmetric, newtable, newpref_src);
+                        }
+                        
+                        kernel_route_operation_depth--;
+                        
+                        if(rc >= 0 && installed_tables && installed_table_count) {
+                            if(*installed_table_count < MAX_TABLES_PER_FILTER) {
+                                installed_tables[(*installed_table_count)++] = newtable;
+                            }
+                        }
+                        
+                        if(rc < 0)
+                            first_rc = rc;
+                        
+                        continue; /* Skip normal operation for this table */
+                    }
+                }
+            }
         }
 
         kernel_route_operation_depth++;
@@ -1354,32 +1529,6 @@ switch_routes(struct babel_route *old, struct babel_route *new)
     local_notify_route(new, LOCAL_CHANGE);
 }
 
-/* Returns the count of installed nexthops for this route's group.
-   Used to detect if transitioning between single↔multipath. */
-static int
-count_installed_nexthops(const struct babel_route *route)
-{
-    int slot, count = 0;
-    struct babel_route *head, *r;
-
-    slot = find_route_slot_for_route(route);
-    if(slot < 0)
-        return 0;
-
-    head = find_group_head_for_route(slot, route, NULL, NULL);
-    if(head == NULL)
-        return 0;
-
-    r = head;
-    while(r) {
-        if(r->installed > 0)
-            count++;
-        r = r->multipath;
-    }
-
-    return count;
-}
-
 /* Returns 1 if the set of (gate, ifindex) pairs that would be passed to the
    kernel differs from those currently installed (r->installed > 0).
    Used in ECMP_EQUAL mode to skip kernel FLUSH+ADD when only metrics changed
@@ -1486,30 +1635,11 @@ change_route_metric(struct babel_route *route,
             if(multipath_ecmp == ECMP_WEIGHT ||
                newmetric >= KERNEL_INFINITY ||
                nexthop_set_changed(route)) {
-                int nexthop_count = collect_multipath_nexthops(route, NULL, 0);
-                int was_multipath = count_installed_nexthops(route) > 1;
-                int will_be_multipath = nexthop_count > 1;
-                
-                /* If transitioning between single↔multipath, must FLUSH+ADD
-                   because kernel can't MODIFY a route between single/multipath modes */
-                if(was_multipath != will_be_multipath) {
-                    rc = change_route(ROUTE_FLUSH, route, oldmetric, route->nexthop,
-                                      route->neigh->ifp->ifindex, 0,
-                                      NULL, NULL, NULL);
-                    if(rc < 0)
-                        perror("kernel_route(FLUSH for multipath transition)");
-                    
-                    rc = change_route(ROUTE_ADD, route, 0, NULL, 0, newmetric,
-                                      NULL, route->installed_tables, &route->installed_table_count);
-                    if(rc < 0)
-                        perror("kernel_route(ADD for multipath transition)");
-                } else {
-                    rc = change_route(ROUTE_MODIFY, route, oldmetric, route->nexthop,
-                                      route->neigh->ifp->ifindex, newmetric,
-                                      NULL, NULL, NULL);
-                    if(rc < 0)
-                        perror("kernel_route(MODIFY metric)");
-                }
+                rc = change_route(ROUTE_MODIFY, route, oldmetric, route->nexthop,
+                                  route->neigh->ifp->ifindex, newmetric,
+                                  NULL, NULL, NULL);
+                if(rc < 0)
+                    perror("kernel_route(MODIFY metric)");
             }
 
 
