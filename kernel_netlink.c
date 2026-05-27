@@ -1310,28 +1310,19 @@ kernel_route_multipath(int operation, int table,
         ifindex = nexthops[0].ifindex;
     }
 
-    /* MODIFY always requires FLUSH+ADD to correctly transition between any
-       nexthop counts (single↔multipath).  The kernel cannot change a
-       multipath route to single-hop with a plain RTM_NEWROUTE replace, and
-       vice-versa. */
+    /* For MODIFY: always use FLUSH+ADD, like kernel_route() does.
+       This must be checked BEFORE nexthop_count to properly detect all transitions
+       (including multipath→single→multipath). */
     if(operation == ROUTE_MODIFY) {
-        kernel_route_multipath(ROUTE_FLUSH, table,
-                               dest, plen,
-                               src, src_plen,
-                               pref_src,
-                               metric, metric,
-                               nexthops, nexthop_count,
+        kernel_route_multipath(ROUTE_FLUSH, table, dest, plen, src, src_plen,
+                               pref_src, metric, metric, nexthops, nexthop_count,
                                0, NULL);
-        return kernel_route_multipath(ROUTE_ADD, newtable,
-                                      dest, plen,
-                                      src, src_plen,
-                                      newpref_src,
-                                      newmetric, newmetric,
-                                      nexthops, nexthop_count,
-                                      0, NULL);
+        return kernel_route_multipath(ROUTE_ADD, newtable, dest, plen, src, src_plen,
+                                      newpref_src, newmetric, newmetric,
+                                      nexthops, nexthop_count, 0, NULL);
     }
 
-    /* For non-MODIFY operations with at most 1 nexthop, fall back to the
+    /* For operations with at most 1 nexthop, fall back to the
        regular single-hop kernel_route path. */
     if(nexthop_count <= 1) {
         return kernel_route(operation, table,
@@ -1344,15 +1335,88 @@ kernel_route_multipath(int operation, int table,
                             newtable, newpref_src);
     }
 
-    /* For FLUSH with >1 nexthops, use the first nexthop to identify the route. */
+    /* For FLUSH: delete the route by dest+table+metric+protocol only.
+       This correctly deletes both multipath and single-hop routes regardless of
+       their current kernel encoding (single RTA_GATEWAY vs RTA_MULTIPATH).
+       Importantly, we do NOT include RTA_OIF/RTA_GATEWAY/RTA_MULTIPATH so
+       the kernel matches solely by destination+table+metric+protocol. */
     if(operation == ROUTE_FLUSH) {
-        return kernel_route(operation, table,
-                            dest, plen,
-                            src, src_plen,
-                            pref_src,
-                            gate, ifindex, metric,
-                            NULL, 0, 0,
-                            0, NULL);
+        union { char raw[1024]; struct nlmsghdr nh; } delbuf;
+        struct rtmsg *del_rtm;
+        struct rtattr *del_rta;
+        int del_len = sizeof(delbuf.raw);
+        int del_ipv4 = v4mapped(dest);
+        int del_use_src = !is_default(src, src_plen);
+
+        if(del_ipv4 && del_use_src) {
+            errno = ENOSYS;
+            return -1;
+        }
+
+        if(!nl_setup) {
+            errno = EIO;
+            return -1;
+        }
+
+        if(nl_command.sock < 0) {
+            int flush_rc = netlink_socket(&nl_command, 0);
+            if(flush_rc < 0)
+                return -1;
+        }
+
+        memset(&delbuf, 0, sizeof(delbuf));
+        delbuf.nh.nlmsg_flags = NLM_F_REQUEST;
+        delbuf.nh.nlmsg_type = RTM_DELROUTE;
+
+        del_rtm = NLMSG_DATA(&delbuf.nh);
+        del_rtm->rtm_family = del_ipv4 ? AF_INET : AF_INET6;
+        del_rtm->rtm_dst_len = del_ipv4 ? plen - 96 : plen;
+        if(del_use_src)
+            del_rtm->rtm_src_len = src_plen;
+        del_rtm->rtm_table = table < 256 ? table : RT_TABLE_UNSPEC;
+        del_rtm->rtm_scope = RT_SCOPE_UNIVERSE;
+        del_rtm->rtm_type = RTN_UNICAST;
+        del_rtm->rtm_protocol = RTPROT_BABEL;
+
+        del_rta = RTM_RTA(del_rtm);
+
+        if(table >= 256) {
+            del_rta = RTA_NEXT(del_rta, del_len);
+            del_rta->rta_len = RTA_LENGTH(sizeof(int));
+            del_rta->rta_type = RTA_TABLE;
+            *(int*)RTA_DATA(del_rta) = table;
+        }
+
+        if(del_ipv4) {
+            del_rta = RTA_NEXT(del_rta, del_len);
+            del_rta->rta_len = RTA_LENGTH(sizeof(struct in_addr));
+            del_rta->rta_type = RTA_DST;
+            memcpy(RTA_DATA(del_rta), dest + 12, sizeof(struct in_addr));
+        } else {
+            del_rta = RTA_NEXT(del_rta, del_len);
+            del_rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr));
+            del_rta->rta_type = RTA_DST;
+            memcpy(RTA_DATA(del_rta), dest, sizeof(struct in6_addr));
+            if(del_use_src) {
+                del_rta = RTA_NEXT(del_rta, del_len);
+                del_rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr));
+                del_rta->rta_type = RTA_SRC;
+                memcpy(RTA_DATA(del_rta), src, sizeof(struct in6_addr));
+            }
+        }
+
+        del_rta = RTA_NEXT(del_rta, del_len);
+        del_rta->rta_len = RTA_LENGTH(sizeof(int));
+        del_rta->rta_type = RTA_PRIORITY;
+        *(int*)RTA_DATA(del_rta) = metric;
+
+        delbuf.nh.nlmsg_len = (char*)del_rta + del_rta->rta_len - delbuf.raw;
+
+        kdebugf("kernel_route_multipath: FLUSH %s from %s table %d metric %d\n",
+                format_prefix(dest, plen), format_prefix(src, src_plen),
+                table, metric);
+
+        return netlink_talk(&delbuf.nh);
     }
 
     if(!nl_setup) {

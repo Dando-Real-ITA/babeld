@@ -660,6 +660,14 @@ babel_main(char **interface_names, int num_interface_names)
         if(timeval_compare(&tv, &now) > 0) {
             int maxfd = 0;
             timeval_minus(&tv, &tv, &now);
+            
+            /* In debug mode, enforce a minimum 1-second delay to avoid
+               spamming logs and reducing CPU consumption. */
+            if(debug > 0 && (tv.tv_sec < 1 || (tv.tv_sec == 1 && tv.tv_usec > 0))) {
+                tv.tv_sec = 1;
+                tv.tv_usec = 0;
+            }
+            
             FD_SET(protocol_socket, &readfds);
             maxfd = MAX(maxfd, protocol_socket);
             FD_SET(kernel_socket, &readfds);

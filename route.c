@@ -1306,129 +1306,29 @@ change_route(int operation, const struct babel_route *route, int metric,
             newtable = table;
         }
 
-        if(multipath_ecmp != ECMP_DISABLED && operation != ROUTE_FLUSH) {
-            nexthop_count = collect_multipath_nexthops(route,
-                                                       nexthops,
-                                                       MAX_ECMP_NEXTHOPS);
-            /* Use multipath encoding if: more than 1 nexthop now, OR the
-               group was ever multipath (tainted) and still has >=1 nexthop.
-               Simple routes that never had >1 nexthop keep normal encoding. */
-            if(nexthop_count > 1 || (nexthop_count == 1 && route->multipath_ever))
-                use_multipath = 1;
-        }
-        
-        /* For MODIFY operations in ECMP mode: detect single↔multipath transitions
-           which the kernel can't handle with MODIFY alone. Convert to FLUSH+ADD. */
-        if(operation == ROUTE_MODIFY && multipath_ecmp != ECMP_DISABLED) {
-            int slot = find_route_slot_for_route(route);
-            if(slot >= 0) {
-                struct babel_route *head = find_group_head_for_route(slot, route, NULL, NULL);
-                if(head != NULL) {
-                    /* Count how many nexthops are currently installed */
-                    int currently_installed_count = 0;
-                    struct babel_route *r = head;
-                    while(r) {
-                        if(r->installed > 0)
-                            currently_installed_count++;
-                        r = r->multipath;
-                    }
-                    
-                    /* Currently multipath if >1 installed, OR tainted with >=1.
-                       Mirrors the use_multipath logic above. */
-                    int currently_multipath =
-                        currently_installed_count > 1 ||
-                        (currently_installed_count == 1 && route->multipath_ever);
-                    int will_be_multipath = use_multipath;
-                    
-                    /* If transitioning between single↔multipath, use FLUSH+ADD */
-                    if(currently_multipath != will_be_multipath) {
-                        kernel_route_operation_depth++;
-
-                        debugf("Multipath mode transition: %s → %s for %s/%u\n",
-                               currently_multipath ? "multipath" : "single",
-                               will_be_multipath ? "multipath" : "single",
-                               format_prefix(route->src->prefix, route->src->plen),
-                               route->src->plen);
-                        
-                        /* FLUSH the old mode */
-                        int flush_rc;
-                        if(currently_multipath) {
-                            flush_rc = kernel_route_multipath(ROUTE_FLUSH,
-                                                             table,
-                                                             route->src->prefix, route->src->plen,
-                                                             route->src->src_prefix, route->src->src_plen,
-                                                             pref_src,
-                                                             metric, 0,
-                                                             nexthops, currently_installed_count,
-                                                             0, newpref_src);
-                            if(flush_rc < 0 && errno == ENOSYS) {
-                                flush_rc = kernel_route(ROUTE_FLUSH, table, 
-                                                       route->src->prefix, route->src->plen,
-                                                       route->src->src_prefix, route->src->src_plen, 
-                                                       pref_src,
-                                                       route->nexthop, ifindex,
-                                                       metric, NULL, 0, 0, 0, newpref_src);
-                            }
-                        } else {
-                            flush_rc = kernel_route(ROUTE_FLUSH, table, 
-                                                   route->src->prefix, route->src->plen,
-                                                   route->src->src_prefix, route->src->src_plen,
-                                                   pref_src,
-                                                   route->nexthop, ifindex,
-                                                   metric, NULL, 0, 0, 0, newpref_src);
-                        }
-                        
-                        if(flush_rc < 0 && errno != ESRCH && errno != ENOENT && errno != EEXIST) {
-                            /* Log unexpected errors, but continue to ADD in new mode */
-                            debugf("warning: FLUSH for transition failed: %s\n", strerror(errno));
-                        }
-                        
-                        /* ADD in the new mode */
-                        if(will_be_multipath) {
-                            rc = kernel_route_multipath(ROUTE_ADD,
-                                                       table,
-                                                       route->src->prefix, route->src->plen,
-                                                       route->src->src_prefix, route->src->src_plen,
-                                                       pref_src,
-                                                       0, newmetric,
-                                                       nexthops, nexthop_count,
-                                                       newtable, newpref_src);
-                            if(rc < 0 && errno == ENOSYS) {
-                                rc = kernel_route(ROUTE_ADD, table, 
-                                                 route->src->prefix, route->src->plen,
-                                                 route->src->src_prefix, route->src->src_plen,
-                                                 pref_src,
-                                                 route->nexthop, ifindex,
-                                                 0, new_next_hop, new_ifindex,
-                                                 newmetric, newtable, newpref_src);
-                            }
-                        } else {
-                            rc = kernel_route(ROUTE_ADD, table,
-                                             route->src->prefix, route->src->plen,
-                                             route->src->src_prefix, route->src->src_plen,
-                                             pref_src,
-                                             route->nexthop, ifindex,
-                                             0, new_next_hop, new_ifindex,
-                                             newmetric, newtable, newpref_src);
-                        }
-                        
-                        kernel_route_operation_depth--;
-                        
-                        if(rc >= 0 && installed_tables && installed_table_count) {
-                            if(*installed_table_count < MAX_TABLES_PER_FILTER) {
-                                installed_tables[(*installed_table_count)++] = newtable;
-                            }
-                        }
-                        
-                        if(rc < 0)
-                            first_rc = rc;
-                        
-                        continue; /* Skip normal operation for this table */
-                    }
+        if(multipath_ecmp != ECMP_DISABLED) {
+            if(operation != ROUTE_FLUSH) {
+                nexthop_count = collect_multipath_nexthops(route,
+                                                           nexthops,
+                                                           MAX_ECMP_NEXTHOPS);
+                /* Use multipath encoding if: more than 1 nexthop now, OR the
+                   group was ever multipath (tainted) and still has >=1 nexthop.
+                   Simple routes that never had >1 nexthop keep normal encoding. */
+                if(nexthop_count > 1 || (nexthop_count == 1 && route->multipath_ever))
+                    use_multipath = 1;
+            } else {
+                /* For ROUTE_FLUSH: if this route was ever installed as multipath,
+                   we must use the multipath path to properly flush the entire group.
+                   Collect all current nexthops in the group for the flush operation. */
+                if(route->multipath_ever) {
+                    nexthop_count = collect_multipath_nexthops(route,
+                                                               nexthops,
+                                                               MAX_ECMP_NEXTHOPS);
+                    use_multipath = 1;
                 }
             }
         }
-
+        
         kernel_route_operation_depth++;
         if(use_multipath) {
             rc = kernel_route_multipath(operation,
