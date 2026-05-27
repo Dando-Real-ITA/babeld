@@ -1427,11 +1427,12 @@ uninstall_route(struct babel_route *route)
            format_prefix(route->src->src_prefix, route->src->src_plen));
     rc = change_route(ROUTE_FLUSH, route, metric_to_kernel(route_metric(route)),
                       NULL, 0, 0, NULL, NULL, NULL);
-    if(rc < 0) {
+    if(rc < 0)
         perror("kernel_route(FLUSH)");
-        return;
-    }
 
+    /* Always clear installed ranks, even if kernel FLUSH failed.
+       This prevents flush_route() from trying to reprogram ECMP routes
+       that we're abandoning (e.g. during shutdown with EINTR). */
     clear_installed_ranks(route, 1);
     local_notify_route(route, LOCAL_CHANGE);
 }
