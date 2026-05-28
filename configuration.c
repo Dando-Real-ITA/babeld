@@ -1152,7 +1152,10 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
         free(id);
         have_id = 1;
     } else {
-        goto error;
+        /* Unknown option: log and skip for forward compatibility */
+        debugf("Unknown configuration option: %s (ignoring)\n", token);
+        c = skip_to_eol(c, gnc, closure);
+        return c;
     }
 
     return skip_eol(c, gnc, closure);
