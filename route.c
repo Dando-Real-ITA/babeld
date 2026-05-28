@@ -578,17 +578,10 @@ flush_route(struct babel_route *route)
                      src->src_prefix, src->src_plen,
                      routes[i]) == 0) {
         struct babel_route *primary = routes[i];
-        int rc;
-        int metric = metric_to_kernel(route_metric(primary));
 
-        rc = change_route(ROUTE_MODIFY, primary, metric,
-                          primary->nexthop,
-                          primary->neigh->ifp->ifindex,
-                          metric,
-                          NULL, NULL, NULL);
-        if(rc < 0)
-            perror("kernel_route(MODIFY flush ecmp member)");
-
+        /* An ECMP member was flushed. Let refresh_installed_ranks() handle
+           the kernel update - it will detect the changed nexthop set and
+           do a single FLUSH+ADD. */
         refresh_installed_ranks(primary);
     }
 
@@ -1492,78 +1485,6 @@ switch_routes(struct babel_route *old, struct babel_route *new)
     local_notify_route(new, LOCAL_CHANGE);
 }
 
-/* Returns 1 if the set of (gate, ifindex) pairs that would be passed to the
-   kernel differs from those currently installed (r->installed > 0).
-   Used in ECMP_EQUAL mode to skip kernel FLUSH+ADD when only metrics changed
-   but every nexthop identity is unchanged. */
-static int
-nexthop_set_changed(const struct babel_route *route)
-{
-    struct kernel_nexthop new_nexthops[MAX_ECMP_NEXTHOPS];
-    struct kernel_nexthop old_nexthops[MAX_ECMP_NEXTHOPS];
-    int new_count;
-    int old_count = 0;
-    int slot, i, j;
-    struct babel_route *head;
-    struct babel_route *r;
-
-    new_count = collect_multipath_nexthops(route, new_nexthops, MAX_ECMP_NEXTHOPS, NULL);
-
-    slot = find_route_slot_for_route(route);
-    if(slot < 0)
-        return 1;
-
-    head = find_group_head_for_route(slot, route, NULL, NULL);
-    if(head == NULL)
-        return 1;
-
-    /* Build currently installed ECMP (ifindex,gate) set for this group. */
-    r = head;
-    while(r) {
-        if(r->installed > 0) {
-            int duplicate = 0;
-
-            for(j = 0; j < old_count; j++) {
-                if(old_nexthops[j].ifindex == r->neigh->ifp->ifindex &&
-                   memcmp(old_nexthops[j].gate, r->nexthop, 16) == 0) {
-                    duplicate = 1;
-                    break;
-                }
-            }
-
-            if(!duplicate) {
-                if(old_count >= MAX_ECMP_NEXTHOPS)
-                    return 1;
-                memcpy(old_nexthops[old_count].gate, r->nexthop, 16);
-                old_nexthops[old_count].ifindex = r->neigh->ifp->ifindex;
-                old_count++;
-            }
-        }
-        r = r->multipath;
-    }
-
-    if(new_count != old_count)
-        return 1;
-
-    /* Check every new nexthop is present among installed ones. */
-    for(i = 0; i < new_count; i++) {
-        int found = 0;
-
-        for(j = 0; j < old_count; j++) {
-            if(old_nexthops[j].ifindex == new_nexthops[i].ifindex &&
-               memcmp(old_nexthops[j].gate, new_nexthops[i].gate, 16) == 0) {
-                found = 1;
-                break;
-            }
-        }
-
-        if(!found)
-            return 1;
-    }
-
-    return 0;
-}
-
 void
 change_route_metric(struct babel_route *route,
                     unsigned refmetric, unsigned cost, unsigned add)
@@ -1591,21 +1512,10 @@ change_route_metric(struct babel_route *route,
                    format_prefix(route->src->src_prefix, route->src->src_plen),
                    oldmetric, newmetric);
 
-            /* ECMP_WEIGHT: always push new metric weights to kernel.
-               ECMP_EQUAL:  weights are uniform, so only push when the nexthop
-               set changes (join/leave) or for retractions (INFINITY) which
-               are part of the loop-avoidance algorithm and must reach kernel. */
-            if(multipath_ecmp == ECMP_WEIGHT ||
-               newmetric >= KERNEL_INFINITY ||
-               nexthop_set_changed(route)) {
-                rc = change_route(ROUTE_MODIFY, route, oldmetric, route->nexthop,
-                                  route->neigh->ifp->ifindex, newmetric,
-                                  NULL, NULL, NULL);
-                if(rc < 0)
-                    perror("kernel_route(MODIFY metric)");
-            }
-
-
+            /* Let refresh_installed_ranks() handle ALL kernel updates for ECMP.
+               It computes the correct nexthop set (excluding retracted routes)
+               and does a single FLUSH+ADD. Doing ROUTE_MODIFY here would cause
+               duplicate/conflicting kernel operations. */
             refresh_installed_ranks(route);
 
             local_notify_route(route, LOCAL_CHANGE);
@@ -2125,17 +2035,10 @@ consider_route(struct babel_route *route)
     if(multipath_ecmp != ECMP_DISABLED &&
        route_metric(installed) < INFINITY &&
        route_metric(route) < INFINITY) {
-        int oldm = metric_to_kernel(route_metric(installed));
-        int rc;
-        rc = change_route(ROUTE_MODIFY, installed, oldm,
-                          installed->nexthop,
-                          installed->neigh->ifp->ifindex,
-                          oldm,
-                          NULL, NULL, NULL);
-        if(rc < 0)
-            perror("kernel_route(MODIFY ecmp refresh)");
-        else
-            refresh_installed_ranks(installed);
+        /* A new route appeared that could join the ECMP group.
+           Let refresh_installed_ranks() handle the kernel update.
+           It will detect the new nexthop and do a single FLUSH+ADD. */
+        refresh_installed_ranks(installed);
     }
 
     return;
