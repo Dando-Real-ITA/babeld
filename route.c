@@ -902,7 +902,8 @@ metric_to_ecmp_weight(int metric, int min_metric)
 static int
 collect_multipath_nexthops(const struct babel_route *route,
                           struct kernel_nexthop *nexthops,
-                          int max_nexthops)
+                          int max_nexthops,
+                          int *best_metric_out)
 {
     int i;
     int best_metric = INFINITY;
@@ -994,6 +995,9 @@ collect_multipath_nexthops(const struct babel_route *route,
                                                        min_metric);
     }
 
+    if(best_metric_out)
+        *best_metric_out = best_metric;
+
     return count;
 }
 
@@ -1056,7 +1060,7 @@ refresh_installed_ranks(struct babel_route *route)
         return;
     }
 
-    count = collect_multipath_nexthops(route, nexthops, MAX_ECMP_NEXTHOPS);
+    count = collect_multipath_nexthops(route, nexthops, MAX_ECMP_NEXTHOPS, NULL);
     if(count == 0) {
         if(route_metric(route) < INFINITY) {
             route->installed = 1;
@@ -1297,6 +1301,8 @@ change_route(int operation, const struct babel_route *route, int metric,
         int use_multipath = 0;
         struct kernel_nexthop nexthops[MAX_ECMP_NEXTHOPS];
         int nexthop_count = 0;
+        int best_metric = INFINITY;
+        int effective_newmetric = newmetric;
         
         if(newsrc && new_filter_result.table_count > 0) {
             /* Use corresponding table from new filter result if available */
@@ -1310,12 +1316,22 @@ change_route(int operation, const struct babel_route *route, int metric,
             if(operation != ROUTE_FLUSH) {
                 nexthop_count = collect_multipath_nexthops(route,
                                                            nexthops,
-                                                           MAX_ECMP_NEXTHOPS);
+                                                           MAX_ECMP_NEXTHOPS,
+                                                           &best_metric);
                 /* Use multipath encoding if: more than 1 nexthop now, OR the
                    group was ever multipath (tainted) and still has >=1 nexthop.
                    Simple routes that never had >1 nexthop keep normal encoding. */
                 if(nexthop_count > 1 || (nexthop_count == 1 && route->multipath_ever))
                     use_multipath = 1;
+                
+                /* When one route retracts (newmetric = INFINITY) but valid
+                   nexthops remain, use the best valid metric instead.
+                   This prevents installing an unreachable route when we still
+                   have reachable nexthops. */
+                if(newmetric >= KERNEL_INFINITY && nexthop_count > 0 &&
+                   best_metric < INFINITY) {
+                    effective_newmetric = metric_to_kernel(best_metric);
+                }
             } else {
                 /* For ROUTE_FLUSH: if this route was ever installed as multipath,
                    we must use the multipath path to properly flush the entire group.
@@ -1323,7 +1339,8 @@ change_route(int operation, const struct babel_route *route, int metric,
                 if(route->multipath_ever) {
                     nexthop_count = collect_multipath_nexthops(route,
                                                                nexthops,
-                                                               MAX_ECMP_NEXTHOPS);
+                                                               MAX_ECMP_NEXTHOPS,
+                                                               NULL);
                     use_multipath = 1;
                 }
             }
@@ -1337,7 +1354,7 @@ change_route(int operation, const struct babel_route *route, int metric,
                                         route->src->src_prefix, route->src->src_plen,
                                         pref_src,
                                         metric,
-                                        newmetric,
+                                        effective_newmetric,
                                         nexthops,
                                         nexthop_count,
                                         operation == ROUTE_MODIFY ? newtable : 0,
@@ -1346,7 +1363,7 @@ change_route(int operation, const struct babel_route *route, int metric,
                 rc = kernel_route(operation, table, route->src->prefix, route->src->plen,
                                   route->src->src_prefix, route->src->src_plen, pref_src,
                                   route->nexthop, ifindex,
-                                  metric, new_next_hop, new_ifindex, newmetric,
+                                  metric, new_next_hop, new_ifindex, effective_newmetric,
                                   operation == ROUTE_MODIFY ? newtable : 0,
                                   newpref_src);
             }
@@ -1354,7 +1371,7 @@ change_route(int operation, const struct babel_route *route, int metric,
             rc = kernel_route(operation, table, route->src->prefix, route->src->plen,
                               route->src->src_prefix, route->src->src_plen, pref_src,
                               route->nexthop, ifindex,
-                              metric, new_next_hop, new_ifindex, newmetric,
+                              metric, new_next_hop, new_ifindex, effective_newmetric,
                               operation == ROUTE_MODIFY ? newtable : 0,
                               newpref_src);
         }
@@ -1490,7 +1507,7 @@ nexthop_set_changed(const struct babel_route *route)
     struct babel_route *head;
     struct babel_route *r;
 
-    new_count = collect_multipath_nexthops(route, new_nexthops, MAX_ECMP_NEXTHOPS);
+    new_count = collect_multipath_nexthops(route, new_nexthops, MAX_ECMP_NEXTHOPS, NULL);
 
     slot = find_route_slot_for_route(route);
     if(slot < 0)

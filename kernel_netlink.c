@@ -1405,16 +1405,19 @@ kernel_route_multipath(int operation, int table,
             }
         }
 
-        del_rta = RTA_NEXT(del_rta, del_len);
-        del_rta->rta_len = RTA_LENGTH(sizeof(int));
-        del_rta->rta_type = RTA_PRIORITY;
-        *(int*)RTA_DATA(del_rta) = metric;
+        /* Note: We intentionally do NOT include RTA_PRIORITY (metric) in the
+           FLUSH request.  The kernel will match by dest+table+protocol only.
+           This is necessary because during multipath→single transitions,
+           the old_primary's metric may have changed to INFINITY (retraction)
+           while the kernel route still has the original metric.
+           Since babeld only installs one route per dest+table+protocol,
+           omitting the metric is safe. */
 
         delbuf.nh.nlmsg_len = (char*)del_rta + del_rta->rta_len - delbuf.raw;
 
-        kdebugf("kernel_route_multipath: FLUSH %s from %s table %d metric %d\n",
+        kdebugf("kernel_route_multipath: FLUSH %s from %s table %d\n",
                 format_prefix(dest, plen), format_prefix(src, src_plen),
-                table, metric);
+                table);
 
         return netlink_talk(&delbuf.nh);
     }
