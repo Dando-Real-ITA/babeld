@@ -552,8 +552,6 @@ flush_route(struct babel_route *route)
         debugf("  -> not installed, nothing to do for kernel\n");
     }
 
-    int was_installed = route->installed;
-
     local_notify_route(route, LOCAL_FLUSH);
 
     {
@@ -1167,8 +1165,14 @@ refresh_installed_ranks(struct babel_route *route)
         if(primary)
             move_installed_route(primary, slot);
         
-        /* Detect if transitioning from multipath to single path */
-        if(old_nexthop_count > 1) {
+        /* Detect transitions that require reprogramming kernel route. */
+        if(old_nexthop_count != 1) {
+            set_changed = 1;
+        } else if(old_primary && primary && old_primary == primary &&
+                  old_primary->installed_table_count == 0) {
+            /* Bookkeeping was lost: force a one-time resync so stale
+               kernel entries (including unreachable siblings) are flushed. */
+            debugf("  set_changed: forcing resync (single nexthop, table state lost)\n");
             set_changed = 1;
         }
         goto update_kernel_if_needed;
@@ -1243,7 +1247,7 @@ update_kernel_if_needed:
                route->src->plen);
 
         /* First FLUSH the old route if one was installed */
-        if(old_primary && old_primary->installed_table_count > 0) {
+        if(old_primary) {
             rc = change_route(ROUTE_FLUSH,
                               old_primary,
                               metric_to_kernel(route_metric(old_primary)),
@@ -1361,6 +1365,14 @@ change_route(int operation, const struct babel_route *route, int metric,
             memcpy(tables_to_use, route->installed_tables, 
                    route->installed_table_count * sizeof(int));
             num_tables = route->installed_table_count;
+        } else if(filter_result.table_count > 0) {
+            /* Bookkeeping fallback: flush from filtered export tables. */
+            memcpy(tables_to_use, filter_result.tables,
+                   filter_result.table_count * sizeof(unsigned int));
+            num_tables = filter_result.table_count;
+        } else if(export_table > 0) {
+            tables_to_use[0] = export_table;
+            num_tables = 1;
         }
     } else {
         /* For ADD/MODIFY, evaluate filter result */
