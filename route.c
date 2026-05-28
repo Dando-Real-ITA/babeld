@@ -1509,16 +1509,21 @@ change_route(int operation, const struct babel_route *route, int metric,
                     effective_newmetric = metric_to_kernel(best_metric);
                 }
             } else {
-                /* For ROUTE_FLUSH: if this route was ever installed as multipath,
-                   we must use the multipath path to properly flush the entire group.
-                   Collect all current nexthops in the group for the flush operation. */
-                if(route->multipath_ever) {
-                    nexthop_count = collect_multipath_nexthops(route,
-                                                               nexthops,
-                                                               MAX_ECMP_NEXTHOPS,
-                                                               NULL);
-                    use_multipath = 1;
-                }
+                /* For ROUTE_FLUSH in ECMP mode, ALWAYS use kernel_route_multipath()
+                   which omits RTA_PRIORITY from the RTM_DELROUTE request.
+                   This is essential because by the time we flush, the route's metric
+                   may have changed to INFINITY (retraction), but the kernel still
+                   stores the route at the original installation metric (e.g. 0).
+                   kernel_route() includes RTA_PRIORITY and would get ESRCH on metric
+                   mismatch, silently leaving the stale route in the kernel and blocking
+                   the subsequent ADD with EEXIST.  kernel_route_multipath FLUSH always
+                   deletes by dest+table+protocol only, which is always correct since
+                   babeld only ever installs one route per that tuple. */
+                nexthop_count = collect_multipath_nexthops(route,
+                                                           nexthops,
+                                                           MAX_ECMP_NEXTHOPS,
+                                                           NULL);
+                use_multipath = 1;
             }
         }
         
