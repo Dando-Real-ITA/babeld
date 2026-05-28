@@ -348,7 +348,7 @@ local_notify_route_1(struct local_socket *s, struct babel_route *route, int kind
 
     rc = snprintf(buf, sizeof(buf),
                   "%s route %lx prefix %s from %s installed %s ecmp %s tables %s "
-                  "id %s metric %d refmetric %d installed_rank %d weight %s via %s if %s\n",
+                  "id %s metric %d refmetric %d age %d installed_rank %d weight %s via %s if %s\n",
                   local_kind(kind),
                   (unsigned long)route,
                   dst_prefix, src_prefix,
@@ -357,6 +357,7 @@ local_notify_route_1(struct local_socket *s, struct babel_route *route, int kind
                   tables_buf,
                   format_eui64(route->src->id),
                   route_metric(route), route->refmetric,
+                  (int)(now.tv_sec - route->time),
                   route->installed,
                   weight_buf,
                   format_address(via),
