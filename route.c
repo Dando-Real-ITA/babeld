@@ -964,6 +964,31 @@ find_route_slot_for_route(const struct babel_route *route)
                            NULL);
 }
 
+static int
+group_has_installed_member(const struct babel_route *route)
+{
+    int i;
+    struct babel_route *head;
+    struct babel_route *r;
+
+    i = find_route_slot_for_route(route);
+    if(i < 0)
+        return 0;
+
+    head = find_group_head_for_route(i, route, NULL, NULL);
+    if(head == NULL)
+        return 0;
+
+    r = head;
+    while(r) {
+        if(r->installed > 0)
+            return 1;
+        r = r->multipath;
+    }
+
+    return 0;
+}
+
 static void
 clear_installed_ranks(const struct babel_route *route, int clear_tables)
 {
@@ -1683,7 +1708,11 @@ change_route_metric(struct babel_route *route,
 {
     int oldmetric = metric_to_kernel(route_metric(route)),
         newmetric = metric_to_kernel(MIN(refmetric + cost + add, INFINITY));
+    int should_refresh_ecmp = 0;
     int suppress_hold_down = 0;
+
+    if(multipath_ecmp != ECMP_DISABLED)
+        should_refresh_ecmp = (route->installed > 0 || group_has_installed_member(route));
 
     if(route->installed > 0 && newmetric >= KERNEL_INFINITY) {
         struct xroute *xroute;
@@ -1697,7 +1726,7 @@ change_route_metric(struct babel_route *route,
         }
     }
 
-    if(multipath_ecmp != ECMP_DISABLED && route->installed > 0) {
+    if(multipath_ecmp != ECMP_DISABLED && should_refresh_ecmp) {
         /* For ECMP, always refresh when the route is installed, regardless of
            whether oldmetric == newmetric.  A route may have had its metric
            computed as KERNEL_INFINITY already (e.g. neighbour cost blew up)
@@ -1716,10 +1745,10 @@ change_route_metric(struct babel_route *route,
             route->smoothed_metric_time = now.tv_sec;
         }
 
-        debugf("change_route_metric(%s from %s, %d -> %d) [ecmp installed=%d]\n",
+         debugf("change_route_metric(%s from %s, %d -> %d) [ecmp installed=%d group_installed=%d]\n",
                format_prefix(route->src->prefix, route->src->plen),
                format_prefix(route->src->src_prefix, route->src->src_plen),
-               oldmetric, newmetric, route->installed);
+             oldmetric, newmetric, route->installed, should_refresh_ecmp);
 
         /* Let refresh_installed_ranks() handle ALL kernel updates for ECMP.
            It computes the correct nexthop set (excluding retracted routes)
