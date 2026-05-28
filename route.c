@@ -1287,6 +1287,12 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
 
         if(primary)
             move_installed_route(primary, slot);
+
+        if(primary && primary->installed_table_count == 0 && old_table_count > 0) {
+            memcpy(primary->installed_tables, old_tables,
+                   old_table_count * sizeof(int));
+            primary->installed_table_count = old_table_count;
+        }
         
         /* Detect transitions that require reprogramming kernel route. */
         if(old_nexthop_count != 1) {
@@ -1332,11 +1338,6 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
 
     if(primary)
         move_installed_route(primary, slot);
-
-    if(primary && primary->installed_table_count == 0 && old_table_count > 0) {
-        memcpy(primary->installed_tables, old_tables, old_table_count * sizeof(int));
-        primary->installed_table_count = old_table_count;
-    }
 
     if(primary && primary->installed_table_count == 0 && old_table_count > 0) {
         memcpy(primary->installed_tables, old_tables, old_table_count * sizeof(int));
@@ -1390,6 +1391,18 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
     }
 
 update_kernel_if_needed:
+    if(!set_changed && primary && route_metric(primary) < INFINITY &&
+       primary->installed_table_count == 0) {
+        if(old_table_count > 0) {
+            memcpy(primary->installed_tables, old_tables,
+                   old_table_count * sizeof(int));
+            primary->installed_table_count = old_table_count;
+        } else {
+            debugf("  set_changed: forcing resync (installed primary has no tables)\n");
+            set_changed = 1;
+        }
+    }
+
     if(!set_changed && force_reprogram && old_nexthop_count > 0) {
         debugf("  set_changed: forced ECMP reprogram\n");
         set_changed = 1;
@@ -2664,7 +2677,7 @@ expire_routes(void)
         while(head) {
             r = head;
             while(r) {
-                if(r->time > now.tv_sec || route_old(r)) {
+                if(r->time > now.tv_sec || route_expired(r)) {
                     flush_route(r);
                     goto again;
                 }
