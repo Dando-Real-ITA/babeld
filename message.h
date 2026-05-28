@@ -100,6 +100,7 @@ void send_update_with_id(struct interface *ifp,
                          unsigned short seqno,
                          const unsigned char *id,
                          unsigned char update_flags);
+void update_myseqno(void);
 void send_wildcard_retraction(struct interface *ifp);
 void send_self_update(struct interface *ifp);
 void send_ihu(struct neighbour *neigh, struct interface *ifp);

@@ -2111,7 +2111,7 @@ send_wildcard_retraction(struct interface *ifp)
     }
 }
 
-static void
+void
 update_myseqno()
 {
     myseqno = seqno_plus(myseqno, 1);
