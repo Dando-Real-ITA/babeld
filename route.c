@@ -218,8 +218,14 @@ find_compatible_group_head(struct babel_route *head,
 {
     struct babel_route *prev = NULL;
 
+    debugf("find_compatible_group_head: route metric=%d neigh=%s\n",
+           route_metric(route), format_address(route->neigh->address));
+
     while(head) {
-        if(route_metric_distance(head, route) <= ecmp_metric_window) {
+        int distance = route_metric_distance(head, route);
+        debugf("  checking head metric=%d distance=%d window=%d\n",
+               route_metric(head), distance, ecmp_metric_window);
+        if(distance <= ecmp_metric_window) {
             if(prev_return)
                 *prev_return = prev;
             return head;
@@ -430,11 +436,18 @@ insert_route(struct babel_route *route)
         struct babel_route *group_head =
             find_compatible_group_head(routes[i], route, &prev_group);
 
+        debugf("insert_route: %s via %s, group_head=%p\n",
+               format_prefix(route->src->prefix, route->src->plen),
+               format_address(route->nexthop),
+               (void*)group_head);
+
         if(group_head == NULL) {
+            debugf("  -> new group head\n");
             insert_group_head_sorted(i, route);
         } else if(route_metric(route) < route_metric(group_head)) {
             struct babel_route *head_next = group_head->next;
 
+            debugf("  -> replacing head (lower metric)\n");
             if(prev_group)
                 prev_group->next = route;
             else
@@ -444,6 +457,7 @@ insert_route(struct babel_route *route)
             route->multipath = group_head;
             group_head->next = NULL;
         } else {
+            debugf("  -> multipath member of %p\n", (void*)group_head);
             insert_multipath_member_sorted(group_head, route);
         }
     }
@@ -1006,6 +1020,7 @@ refresh_installed_ranks(struct babel_route *route)
     struct kernel_nexthop old_nexthops[MAX_ECMP_NEXTHOPS];
     int old_nexthop_count = 0;
     int set_changed = 0;
+    int group_size = 0;
 
     slot = find_route_slot_for_route(route);
     if(slot < 0)
@@ -1015,10 +1030,24 @@ refresh_installed_ranks(struct babel_route *route)
     if(head == NULL)
         return;
 
+    /* Count group members for debug */
+    r = head;
+    while(r) {
+        group_size++;
+        r = r->multipath;
+    }
+
+    debugf("refresh_installed_ranks(%s): slot=%d, head=%p, group_size=%d\n",
+           format_prefix(route->src->prefix, route->src->plen),
+           slot, (void*)head, group_size);
+
     /* Record currently installed nexthops before refresh */
     if(multipath_ecmp != ECMP_DISABLED) {
         r = head;
         while(r) {
+            debugf("  member %p: installed=%d metric=%d via %s if %s\n",
+                   (void*)r, r->installed, route_metric(r),
+                   format_address(r->nexthop), r->neigh->ifp->name);
             if(r->installed > 0) {
                 if(r->installed == 1 && old_primary == NULL)
                     old_primary = r;
@@ -1148,6 +1177,10 @@ refresh_installed_ranks(struct babel_route *route)
 
 update_kernel_if_needed:
     /* If ECMP set changed, reprogram kernel route regardless of metric delta. */
+    debugf("refresh_installed_ranks: old_nexthop_count=%d, count=%d, set_changed=%d, primary=%p, old_primary=%p\n",
+           old_nexthop_count, count, set_changed, (void*)primary, (void*)old_primary);
+    if(old_primary)
+        debugf("  old_primary installed_table_count=%d\n", old_primary->installed_table_count);
     if(set_changed && primary && route_metric(primary) < INFINITY) {
         int rc;
         int metric;
@@ -1178,6 +1211,15 @@ update_kernel_if_needed:
                           &primary->installed_table_count);
         if(rc < 0 && errno != EEXIST)
             perror("kernel_route(ADD ecmp refresh)");
+    }
+
+    /* Debug: show final state */
+    r = head;
+    while(r) {
+        debugf("  final: %p installed=%d tables=%d via %s\n",
+               (void*)r, r->installed, r->installed_table_count,
+               format_address(r->nexthop));
+        r = r->multipath;
     }
 }
 
@@ -2038,12 +2080,20 @@ consider_route(struct babel_route *route)
         /* A new route appeared that could join the ECMP group.
            Let refresh_installed_ranks() handle the kernel update.
            It will detect the new nexthop and do a single FLUSH+ADD. */
+        debugf("consider_route: ECMP refresh for %s via %s (installed via %s)\n",
+               format_prefix(route->src->prefix, route->src->plen),
+               format_address(route->nexthop),
+               format_address(installed->nexthop));
         refresh_installed_ranks(installed);
     }
 
     return;
 
  install:
+    debugf("consider_route: INSTALLING %s via %s (was installed=%p)\n",
+           format_prefix(route->src->prefix, route->src->plen),
+           format_address(route->nexthop),
+           (void*)installed);
     switch_routes(installed, route);
     if(installed && route->installed == 1)
         send_triggered_update(route, installed->src, route_metric(installed));
