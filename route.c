@@ -311,6 +311,48 @@ find_group_head_for_route(int slot,
     return NULL;
 }
 
+static void
+merge_groups_if_compatible(int slot,
+                           struct babel_route *installed,
+                           struct babel_route *route)
+{
+    struct babel_route *installed_head;
+    struct babel_route *route_head;
+    struct babel_route *prev_installed_head = NULL;
+    struct babel_route *prev_route_head = NULL;
+
+    if(slot < 0 || slot >= route_slots || installed == NULL || route == NULL)
+        return;
+
+    installed_head = find_group_head_for_route(slot, installed,
+                                               &prev_installed_head, NULL);
+    route_head = find_group_head_for_route(slot, route,
+                                           &prev_route_head, NULL);
+
+    if(installed_head == NULL || route_head == NULL || installed_head == route_head)
+        return;
+
+    if(route_metric_distance(installed_head, route) > ecmp_metric_window)
+        return;
+
+    debugf("merge_groups_if_compatible: merging group %p into %p for %s\n",
+           (void*)route_head, (void*)installed_head,
+           format_prefix(route->src->prefix, route->src->plen));
+
+    if(prev_route_head)
+        prev_route_head->next = route_head->next;
+    else
+        routes[slot] = route_head->next;
+
+    while(route_head) {
+        struct babel_route *next = route_head->multipath;
+        route_head->multipath = NULL;
+        route_head->next = NULL;
+        insert_multipath_member_sorted(installed_head, route_head);
+        route_head = next;
+    }
+}
+
 struct babel_route *
 find_installed_route(const unsigned char *id,
                      const unsigned char *prefix, unsigned char plen,
@@ -2146,6 +2188,10 @@ consider_route(struct babel_route *route)
     if(multipath_ecmp != ECMP_DISABLED &&
        route_metric(installed) < INFINITY &&
        route_metric(route) < INFINITY) {
+          int slot = find_route_slot_for_route(installed);
+
+          merge_groups_if_compatible(slot, installed, route);
+
         /* A new route appeared that could join the ECMP group.
            Let refresh_installed_ranks() handle the kernel update.
            It will detect the new nexthop and do a single FLUSH+ADD. */
