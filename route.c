@@ -1682,6 +1682,19 @@ change_route_metric(struct babel_route *route,
 {
     int oldmetric = metric_to_kernel(route_metric(route)),
         newmetric = metric_to_kernel(MIN(refmetric + cost + add, INFINITY));
+    int suppress_hold_down = 0;
+
+    if(route->installed > 0 && newmetric >= KERNEL_INFINITY) {
+        struct xroute *xroute;
+
+        xroute = find_xroute(route->src->prefix, route->src->plen,
+                             route->src->src_prefix, route->src->src_plen);
+        if(xroute && (allow_duplicates < 0 || xroute->metric >= allow_duplicates)) {
+            suppress_hold_down = 1;
+            debugf("change_route_metric: suppressing unreachable hold-down for %s (local xroute exists)\n",
+                   format_prefix(route->src->prefix, route->src->plen));
+        }
+    }
 
     if(multipath_ecmp != ECMP_DISABLED && route->installed > 0) {
         /* For ECMP, always refresh when the route is installed, regardless of
@@ -1721,6 +1734,16 @@ change_route_metric(struct babel_route *route,
         int rc;
         unsigned int ifindex = route_ifindex_or_zero(route);
 
+        if(suppress_hold_down) {
+            rc = change_route(ROUTE_FLUSH, route, oldmetric,
+                              NULL, 0, 0, NULL, NULL, NULL);
+            if(rc < 0 && errno != ESRCH && errno != ENOENT)
+                perror("kernel_route(FLUSH hold-down suppress)");
+
+            clear_installed_ranks(route, 1);
+            goto update_local_state;
+        }
+
         debugf("change_route_metric(%s from %s, %d -> %d)\n",
                format_prefix(route->src->prefix, route->src->plen),
                format_prefix(route->src->src_prefix, route->src->src_plen),
@@ -1735,6 +1758,7 @@ change_route_metric(struct babel_route *route,
         refresh_installed_ranks(route);
     }
 
+update_local_state:
     /* Update route->smoothed_metric using the old metric. */
     route_smoothed_metric(route);
 
