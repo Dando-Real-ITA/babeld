@@ -205,6 +205,7 @@ local_notify_neighbour_1(struct local_socket *s,
                          struct neighbour *neigh, int kind)
 {
     char buf[512], rttbuf[64];
+    const char *ifname = "(none)";
     int rc;
 
     rttbuf[0] = '\0';
@@ -215,6 +216,9 @@ local_notify_neighbour_1(struct local_socket *s,
             rttbuf[0] = '\0';
     }
 
+    if(neigh->ifp)
+        ifname = neigh->ifp->name;
+
     rc = snprintf(buf, 512,
                   "%s neighbour %lx address %s "
                   "if %s reach %04x ureach %04x "
@@ -224,7 +228,7 @@ local_notify_neighbour_1(struct local_socket *s,
                      address as a unique identifier. */
                   (unsigned long int)neigh,
                   format_address(neigh->address),
-                  neigh->ifp->name,
+                        ifname,
                   neigh->hello.reach,
                   neigh->uhello.reach,
                   neighbour_rxcost(neigh),

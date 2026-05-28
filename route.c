@@ -1143,8 +1143,8 @@ collect_multipath_nexthops(const struct babel_route *route,
     return count;
 }
 
-void
-refresh_installed_ranks(struct babel_route *route)
+static void
+refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
 {
     int slot, i, count;
     struct babel_route *head;
@@ -1353,6 +1353,11 @@ refresh_installed_ranks(struct babel_route *route)
     }
 
 update_kernel_if_needed:
+    if(!set_changed && force_reprogram && old_nexthop_count > 0) {
+        debugf("  set_changed: forced ECMP reprogram\n");
+        set_changed = 1;
+    }
+
     /* If ECMP set changed, reprogram kernel route regardless of metric delta. */
     debugf("refresh_installed_ranks: old_nexthop_count=%d, count=%d, set_changed=%d, primary=%p, old_primary=%p\n",
            old_nexthop_count, count, set_changed, (void*)primary, (void*)old_primary);
@@ -1423,6 +1428,12 @@ update_kernel_if_needed:
                format_address(r->nexthop));
         r = r->multipath;
     }
+}
+
+void
+refresh_installed_ranks(struct babel_route *route)
+{
+    refresh_installed_ranks_ext(route, 0);
 }
 
 
@@ -1753,12 +1764,16 @@ change_route_metric(struct babel_route *route,
         newmetric = metric_to_kernel(MIN(refmetric + cost + add, INFINITY));
     int should_refresh_ecmp = 0;
     int suppress_hold_down = 0;
+    int force_reprogram = 0;
 
     if(multipath_ecmp != ECMP_DISABLED)
         should_refresh_ecmp = (route->installed > 0 || group_has_installed_member(route));
 
     if(route->installed > 0 && newmetric >= KERNEL_INFINITY) {
         struct xroute *xroute;
+
+        if(multipath_ecmp != ECMP_DISABLED && route->installed == 1)
+            force_reprogram = 1;
 
         xroute = find_xroute(route->src->prefix, route->src->plen,
                              route->src->src_prefix, route->src->src_plen);
@@ -1797,7 +1812,7 @@ change_route_metric(struct babel_route *route,
            It computes the correct nexthop set (excluding retracted routes)
            and does a single FLUSH+ADD. Doing ROUTE_MODIFY here would cause
            duplicate/conflicting kernel operations. */
-        refresh_installed_ranks(route);
+          refresh_installed_ranks_ext(route, force_reprogram);
 
         local_notify_route(route, LOCAL_CHANGE);
         return;

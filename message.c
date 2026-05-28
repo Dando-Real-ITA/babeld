@@ -1017,14 +1017,16 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                        format_address(from), ifp->name);
                 /* If a neighbour is requesting a full route dump from us,
                    we might as well send it an IHU. */
-                send_ihu(neigh, NULL);
+                     if(neigh && neigh->ifp)
+                          send_ihu(neigh, NULL);
                 /* Since nodes send wildcard requests on boot, booting
                    a large number of nodes at the same time may cause an
                    update storm.  Ignore a wildcard request that happens
                    shortly after we sent a full update. */
-                if(neigh->ifp->last_update_time <
-                   now.tv_sec - MAX(neigh->ifp->hello_interval / 100, 1)) {
-                    send_update(neigh->ifp, 0, NULL, 0, NULL, 0);
+                     if(neigh && neigh->ifp &&
+                         neigh->ifp->last_update_time <
+                         now.tv_sec - MAX(neigh->ifp->hello_interval / 100, 1)) {
+                          send_update(neigh->ifp, 0, NULL, 0, NULL, 0);
                 }
             } else {
                 debugf("Received request for dst %s%s%s from %s on %s.\n",
@@ -1320,6 +1322,9 @@ send_pc(struct buffered *buf, struct interface *ifp)
 void
 send_ack(struct neighbour *neigh, unsigned short nonce, unsigned short interval)
 {
+    if(neigh == NULL || neigh->ifp == NULL)
+        return;
+
     debugf("Sending ack (%04x) to %s on %s.\n",
            nonce, format_address(neigh->address), neigh->ifp->name);
     start_message(&neigh->buf, neigh->ifp, MESSAGE_ACK, 2);
@@ -1333,6 +1338,9 @@ int
 send_challenge_request(struct neighbour *neigh)
 {
     int rc;
+
+    if(neigh == NULL || neigh->ifp == NULL)
+        return -1;
 
     gettime(&now);
     if(timeval_compare(&now, &neigh->challenge_request_limitation) <= 0)
@@ -1359,6 +1367,9 @@ int
 send_challenge_reply(struct neighbour *neigh, const unsigned char *crypto_nonce,
                      int len)
 {
+    if(neigh == NULL || neigh->ifp == NULL)
+        return -1;
+
     gettime(&now);
     if(timeval_compare(&now, &neigh->challenge_reply_limitation) <= 0)
         return -1;
@@ -1428,6 +1439,9 @@ send_multicast_hello(struct interface *ifp, unsigned interval, int force)
 void
 send_unicast_hello(struct neighbour *neigh, unsigned interval, int force)
 {
+    if(neigh == NULL || neigh->ifp == NULL)
+        return;
+
     if(!if_up(neigh->ifp))
         return;
 
@@ -1758,6 +1772,7 @@ flushupdates(struct interface *ifp)
                                     seqno, route->src->id, ifp);
 
                 if((ifp->flags & IF_SPLIT_HORIZON) &&
+                   route->neigh && route->neigh->ifp &&
                    route->neigh->ifp == ifp)
                     continue;
 
@@ -2190,6 +2205,9 @@ send_ihu(struct neighbour *neigh, struct interface *ifp)
         return;
 
     ifp = neigh->ifp;
+    if(ifp == NULL)
+        return;
+
     if(!if_up(ifp))
         return;
 
@@ -2343,6 +2361,9 @@ send_unicast_request(struct neighbour *neigh,
                      const unsigned char *prefix, unsigned char plen,
                      const unsigned char *src_prefix, unsigned char src_plen)
 {
+    if(neigh == NULL || neigh->ifp == NULL)
+        return;
+
     if(!if_up(neigh->ifp))
         return;
 

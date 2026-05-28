@@ -1219,18 +1219,26 @@ dump_tables(FILE *out)
     }
 
     FOR_ALL_NEIGHBOURS(neigh) {
+        const char *ifname = "(none)";
+        int isup = 0;
         neighbour_count++;
+
+        if(neigh->ifp) {
+            ifname = neigh->ifp->name;
+            isup = if_up(neigh->ifp);
+        }
+
         fprintf(out, "Neighbour %s dev %s reach %04x ureach %04x "
                 "rxcost %u txcost %d rtt %s rttcost %u%s.\n",
                 format_address(neigh->address),
-                neigh->ifp->name,
+                ifname,
                 neigh->hello.reach,
                 neigh->uhello.reach,
                 neighbour_rxcost(neigh),
                 neigh->txcost,
                 format_thousands(neigh->rtt),
                 neighbour_rttcost(neigh),
-                if_up(neigh->ifp) ? "" : " (down)");
+                isup ? "" : " (down)");
     }
 
     xroutes = xroute_stream();
