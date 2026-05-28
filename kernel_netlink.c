@@ -1322,24 +1322,12 @@ kernel_route_multipath(int operation, int table,
                                       nexthops, nexthop_count, 0, NULL);
     }
 
-    /* For operations with at most 1 nexthop, fall back to the
-       regular single-hop kernel_route path. */
-    if(nexthop_count <= 1) {
-        return kernel_route(operation, table,
-                            dest, plen,
-                            src, src_plen,
-                            pref_src,
-                            gate, ifindex, metric,
-                            gate, ifindex,
-                            metric,
-                            newtable, newpref_src);
-    }
-
-    /* For FLUSH: delete the route by dest+table+metric+protocol only.
+    /* For FLUSH: delete the route by dest+table+protocol only.
        This correctly deletes both multipath and single-hop routes regardless of
        their current kernel encoding (single RTA_GATEWAY vs RTA_MULTIPATH).
-       Importantly, we do NOT include RTA_OIF/RTA_GATEWAY/RTA_MULTIPATH so
-       the kernel matches solely by destination+table+metric+protocol. */
+       This must be checked BEFORE nexthop_count to handle multipath→single transitions.
+       Importantly, we do NOT include RTA_OIF/RTA_GATEWAY/RTA_MULTIPATH/RTA_PRIORITY so
+       the kernel matches solely by destination+table+protocol. */
     if(operation == ROUTE_FLUSH) {
         union { char raw[1024]; struct nlmsghdr nh; } delbuf;
         struct rtmsg *del_rtm;
@@ -1420,6 +1408,19 @@ kernel_route_multipath(int operation, int table,
                 table);
 
         return netlink_talk(&delbuf.nh);
+    }
+
+    /* For operations with at most 1 nexthop, fall back to the
+       regular single-hop kernel_route path. */
+    if(nexthop_count <= 1) {
+        return kernel_route(operation, table,
+                            dest, plen,
+                            src, src_plen,
+                            pref_src,
+                            gate, ifindex, metric,
+                            gate, ifindex,
+                            metric,
+                            newtable, newpref_src);
     }
 
     if(!nl_setup) {
