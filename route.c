@@ -219,7 +219,8 @@ find_compatible_group_head(struct babel_route *head,
     struct babel_route *prev = NULL;
 
     debugf("find_compatible_group_head: route metric=%d neigh=%s\n",
-           route_metric(route), format_address(route->neigh->address));
+           route_metric(route),
+           (route->neigh ? format_address(route->neigh->address) : "(null)"));
 
     while(head) {
         int distance = route_metric_distance(head, route);
@@ -864,6 +865,14 @@ metric_to_kernel(int metric)
         }
 }
 
+static unsigned int
+route_ifindex_or_zero(const struct babel_route *route)
+{
+    if(route && route->neigh && route->neigh->ifp)
+        return route->neigh->ifp->ifindex;
+    return 0;
+}
+
 static void
 move_installed_route(struct babel_route *route, int i)
 {
@@ -1404,7 +1413,7 @@ change_route(int operation, const struct babel_route *route, int metric,
     struct filter_result filter_result, new_filter_result;
     unsigned char *pref_src = NULL;
     unsigned char *newpref_src = NULL;
-    unsigned int ifindex = route->neigh->ifp->ifindex;
+    unsigned int ifindex = route_ifindex_or_zero(route);
     int m, i, rc, first_rc = 0;
     int tables_to_use[MAX_TABLES_PER_FILTER];
     int num_tables = 0;
@@ -1628,6 +1637,7 @@ static void
 switch_routes(struct babel_route *old, struct babel_route *new)
 {
     int rc;
+    unsigned int new_ifindex;
 
     if(!old) {
         install_route(new);
@@ -1641,11 +1651,13 @@ switch_routes(struct babel_route *old, struct babel_route *new)
         fprintf(stderr, "WARNING: switching to unfeasible route "
                 "(this shouldn't happen).");
 
+    new_ifindex = route_ifindex_or_zero(new);
+
     debugf("switch_routes(%s from %s)\n",
            format_prefix(old->src->prefix, old->src->plen),
            format_prefix(old->src->src_prefix, old->src->src_plen));
     rc = change_route(ROUTE_MODIFY, old, metric_to_kernel(route_metric(old)),
-                      new->nexthop, new->neigh->ifp->ifindex,
+                 new->nexthop, new_ifindex,
                       metric_to_kernel(route_metric(new)),
                       new->src, new->installed_tables, &new->installed_table_count);
     if(rc < 0) {
@@ -1702,13 +1714,14 @@ change_route_metric(struct babel_route *route,
 
     if(route->installed > 0 && oldmetric != newmetric) {
         int rc;
+        unsigned int ifindex = route_ifindex_or_zero(route);
 
         debugf("change_route_metric(%s from %s, %d -> %d)\n",
                format_prefix(route->src->prefix, route->src->plen),
                format_prefix(route->src->src_prefix, route->src->src_plen),
                oldmetric, newmetric);
            rc = change_route(ROUTE_MODIFY, route, oldmetric, route->nexthop,
-                     route->neigh->ifp->ifindex, newmetric, NULL, NULL, NULL);
+                     ifindex, newmetric, NULL, NULL, NULL);
         if(rc < 0) {
             perror("kernel_route(MODIFY metric)");
             return;

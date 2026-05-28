@@ -1394,12 +1394,9 @@ kernel_route_multipath(int operation, int table,
         }
 
         /* Note: We intentionally do NOT include RTA_PRIORITY (metric) in the
-           FLUSH request.  The kernel will match by dest+table+protocol only.
-           This is necessary because during multipath→single transitions,
-           the old_primary's metric may have changed to INFINITY (retraction)
-           while the kernel route still has the original metric.
-           Since babeld only installs one route per dest+table+protocol,
-           omitting the metric is safe. */
+           FLUSH request so the kernel matches by dest+table+protocol only.
+           This is necessary because during retraction the old_primary's metric
+           changes to INFINITY while the kernel still has the original metric. */
 
         delbuf.nh.nlmsg_len = (char*)del_rta + del_rta->rta_len - delbuf.raw;
 
@@ -1407,7 +1404,20 @@ kernel_route_multipath(int operation, int table,
                 format_prefix(dest, plen), format_prefix(src, src_plen),
                 table);
 
-        return netlink_talk(&delbuf.nh);
+        rc = netlink_talk(&delbuf.nh);
+
+        /* Also sweep RTN_UNREACHABLE hold-downs unconditionally.  The unicast
+           route (priority = kernel_metric) and the unreachable hold-down
+           (priority = 0xFFFFFFFF = -1) coexist at *different* kernel priorities,
+           so the RTN_UNICAST delete above will succeed for the good route but
+           leave the hold-down behind.  We delete both regardless; ESRCH/ENOENT
+           is silently ignored when no hold-down is present. */
+        del_rtm->rtm_type = RTN_UNREACHABLE;
+        kdebugf("kernel_route_multipath: FLUSH (unreachable sweep) %s from %s table %d\n",
+                format_prefix(dest, plen), format_prefix(src, src_plen), table);
+        netlink_talk(&delbuf.nh);  /* ignore rc — hold-down may not exist */
+
+        return rc;
     }
 
     /* For operations with at most 1 nexthop, fall back to the

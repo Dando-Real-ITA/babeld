@@ -315,6 +315,8 @@ local_notify_route_1(struct local_socket *s, struct babel_route *route, int kind
     char buf[640], tables_buf[384], weight_buf[32];
     int rc, i;
     int weight;
+    const unsigned char *via = zeroes;
+    const char *ifname = "(none)";
     const char *dst_prefix = format_prefix(route->src->prefix,
                                            route->src->plen);
     const char *src_prefix = format_prefix(route->src->src_prefix,
@@ -339,6 +341,11 @@ local_notify_route_1(struct local_socket *s, struct babel_route *route, int kind
     else
         snprintf(weight_buf, sizeof(weight_buf), "-");
 
+    if(route->neigh && route->neigh->ifp) {
+        via = route->neigh->address;
+        ifname = route->neigh->ifp->name;
+    }
+
     rc = snprintf(buf, sizeof(buf),
                   "%s route %lx prefix %s from %s installed %s ecmp %s tables %s "
                   "id %s metric %d refmetric %d installed_rank %d weight %s via %s if %s\n",
@@ -352,8 +359,8 @@ local_notify_route_1(struct local_socket *s, struct babel_route *route, int kind
                   route_metric(route), route->refmetric,
                   route->installed,
                   weight_buf,
-                  format_address(route->neigh->address),
-                  route->neigh->ifp->name);
+                  format_address(via),
+                  ifname);
 
     if(rc < 0 || rc >= (int)sizeof(buf))
         goto fail;
