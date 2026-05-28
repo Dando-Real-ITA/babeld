@@ -1568,42 +1568,76 @@ change_route(int operation, const struct babel_route *route, int metric,
             newtable = table;
         }
 
-        if(multipath_ecmp != ECMP_DISABLED) {
-            if(operation != ROUTE_FLUSH) {
-                nexthop_count = collect_multipath_nexthops(route,
-                                                           nexthops,
-                                                           MAX_ECMP_NEXTHOPS,
-                                                           &best_metric);
-                /* Use multipath encoding if: more than 1 nexthop now, OR the
-                   group was ever multipath (tainted) and still has >=1 nexthop.
-                   Simple routes that never had >1 nexthop keep normal encoding. */
-                if(nexthop_count > 1 || (nexthop_count == 1 && route->multipath_ever))
-                    use_multipath = 1;
-                
-                /* When one route retracts (newmetric = INFINITY) but valid
-                   nexthops remain, use the best valid metric instead.
-                   This prevents installing an unreachable route when we still
-                   have reachable nexthops. */
-                if(newmetric >= KERNEL_INFINITY && nexthop_count > 0 &&
-                   best_metric < INFINITY) {
-                    effective_newmetric = metric_to_kernel(best_metric);
-                }
+        if(operation == ROUTE_FLUSH) {
+            int rc_multi, rc_single;
+            int errno_multi = 0, errno_single = 0;
+
+            /* Generic delete pass: try both multipath-style and single-hop
+               deletes so we remove whichever encoding the kernel currently has. */
+            kernel_route_operation_depth++;
+
+            rc_multi = kernel_route_multipath(ROUTE_FLUSH,
+                                              table,
+                                              route->src->prefix, route->src->plen,
+                                              route->src->src_prefix, route->src->src_plen,
+                                              pref_src,
+                                              metric,
+                                              metric,
+                                              NULL,
+                                              0,
+                                              0,
+                                              NULL);
+            if(rc_multi < 0)
+                errno_multi = errno;
+
+            rc_single = kernel_route(ROUTE_FLUSH, table,
+                                     route->src->prefix, route->src->plen,
+                                     route->src->src_prefix, route->src->src_plen, pref_src,
+                                     route->nexthop, ifindex,
+                                     metric, NULL, 0, 0,
+                                     0, NULL);
+            if(rc_single < 0)
+                errno_single = errno;
+
+            kernel_route_operation_depth--;
+
+            if(rc_multi >= 0 || rc_single >= 0) {
+                rc = 0;
+            } else if((errno_multi == ESRCH || errno_multi == ENOENT || errno_multi == ENOSYS) &&
+                      (errno_single == ESRCH || errno_single == ENOENT)) {
+                /* Route not present in either encoding: treat as successful flush. */
+                rc = 0;
             } else {
-                /* For ROUTE_FLUSH in ECMP mode, ALWAYS use kernel_route_multipath()
-                   which omits RTA_PRIORITY from the RTM_DELROUTE request.
-                   This is essential because by the time we flush, the route's metric
-                   may have changed to INFINITY (retraction), but the kernel still
-                   stores the route at the original installation metric (e.g. 0).
-                   kernel_route() includes RTA_PRIORITY and would get ESRCH on metric
-                   mismatch, silently leaving the stale route in the kernel and blocking
-                   the subsequent ADD with EEXIST.  kernel_route_multipath FLUSH always
-                   deletes by dest+table+protocol only, which is always correct since
-                   babeld only ever installs one route per that tuple. */
-                nexthop_count = collect_multipath_nexthops(route,
-                                                           nexthops,
-                                                           MAX_ECMP_NEXTHOPS,
-                                                           NULL);
+                rc = -1;
+                errno = (errno_multi != 0 && errno_multi != ENOSYS) ?
+                        errno_multi : errno_single;
+            }
+
+            if(rc < 0) {
+                if(first_rc == 0)
+                    first_rc = rc;
+            }
+            continue;
+        }
+
+        if(multipath_ecmp != ECMP_DISABLED) {
+            nexthop_count = collect_multipath_nexthops(route,
+                                                       nexthops,
+                                                       MAX_ECMP_NEXTHOPS,
+                                                       &best_metric);
+            /* Use multipath encoding if: more than 1 nexthop now, OR the
+               group was ever multipath (tainted) and still has >=1 nexthop.
+               Simple routes that never had >1 nexthop keep normal encoding. */
+            if(nexthop_count > 1 || (nexthop_count == 1 && route->multipath_ever))
                 use_multipath = 1;
+
+            /* When one route retracts (newmetric = INFINITY) but valid
+               nexthops remain, use the best valid metric instead.
+               This prevents installing an unreachable route when we still
+               have reachable nexthops. */
+            if(newmetric >= KERNEL_INFINITY && nexthop_count > 0 &&
+               best_metric < INFINITY) {
+                effective_newmetric = metric_to_kernel(best_metric);
             }
         }
         
@@ -1765,6 +1799,7 @@ change_route_metric(struct babel_route *route,
     int should_refresh_ecmp = 0;
     int suppress_hold_down = 0;
     int force_reprogram = 0;
+    int expired = route_expired(route);
 
     if(multipath_ecmp != ECMP_DISABLED)
         should_refresh_ecmp = (route->installed > 0 || group_has_installed_member(route));
@@ -1782,6 +1817,11 @@ change_route_metric(struct babel_route *route,
             debugf("change_route_metric: suppressing unreachable hold-down for %s (local xroute exists)\n",
                    format_prefix(route->src->prefix, route->src->plen));
         }
+    }
+
+    if(multipath_ecmp != ECMP_DISABLED && should_refresh_ecmp &&
+       (expired || newmetric >= KERNEL_INFINITY)) {
+        force_reprogram = 1;
     }
 
     if(multipath_ecmp != ECMP_DISABLED && should_refresh_ecmp) {
