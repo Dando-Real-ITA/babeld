@@ -758,7 +758,8 @@ flush_interface_routes(struct interface *ifp, int v4only)
         while(head) {
             struct babel_route *r = head;
             while(r) {
-                if(r->neigh->ifp == ifp &&
+                if(r->neigh && r->neigh->ifp &&
+                   r->neigh->ifp == ifp &&
                    (!v4only || v4mapped(r->nexthop))) {
                     flush_route(r);
                     goto again;
@@ -1948,6 +1949,9 @@ update_route_metric(struct babel_route *route)
         }
     } else {
         struct neighbour *neigh = route->neigh;
+        if(neigh == NULL || neigh->ifp == NULL)
+            return;
+
         int add_metric = input_filter(route->src->id,
                                       route->src->prefix, route->src->plen,
                                       route->src->src_prefix,
@@ -1998,7 +2002,7 @@ update_interface_metric(struct interface *ifp)
         while(head) {
             struct babel_route *r = head;
             while(r) {
-                if(r->neigh->ifp == ifp)
+                if(r->neigh && r->neigh->ifp && r->neigh->ifp == ifp)
                     update_route_metric(r);
                 r = r->multipath;
             }
@@ -2045,6 +2049,9 @@ update_route(const unsigned char *id,
 
     is_v4 = v4mapped(prefix);
     if(is_v4 != v4mapped(src_prefix))
+        return NULL;
+
+    if(neigh == NULL || neigh->ifp == NULL)
         return NULL;
 
     add_metric = input_filter(id, prefix, plen, src_prefix, src_plen,

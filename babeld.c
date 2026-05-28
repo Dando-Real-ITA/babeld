@@ -1084,9 +1084,9 @@ init_signals(void)
 static void
 dump_route(FILE *out, struct babel_route *route)
 {
-    const unsigned char *nexthop =
-        memcmp(route->nexthop, route->neigh->address, 16) == 0 ?
-        NULL : route->nexthop;
+    const unsigned char *neigh_addr = zeroes;
+    const char *neigh_ifname = "(none)";
+    const unsigned char *nexthop = route->nexthop;
     char tables_buf[384];
     char weight_buf[32];
     int weight;
@@ -1110,6 +1110,12 @@ dump_route(FILE *out, struct babel_route *route)
     else
         snprintf(weight_buf, sizeof(weight_buf), "-");
 
+    if(route->neigh && route->neigh->ifp) {
+        neigh_addr = route->neigh->address;
+        neigh_ifname = route->neigh->ifp->name;
+        nexthop = memcmp(route->nexthop, neigh_addr, 16) == 0 ? NULL : route->nexthop;
+    }
+
     fprintf(out, "%s from %s metric %d (%d) refmetric %d id %s "
             "seqno %d age %d via %s neigh %s%s%s%s ecmp %s tables %s installed-rank %d weight %s\n",
             format_prefix(route->src->prefix, route->src->plen),
@@ -1118,8 +1124,8 @@ dump_route(FILE *out, struct babel_route *route)
             format_eui64(route->src->id),
             (int)route->seqno,
             (int)(now.tv_sec - route->time),
-            route->neigh->ifp->name,
-            format_address(route->neigh->address),
+            neigh_ifname,
+            format_address(neigh_addr),
             nexthop ? " nexthop " : "",
             nexthop ? format_address(nexthop) : "",
             route->installed ? " (installed)" :
