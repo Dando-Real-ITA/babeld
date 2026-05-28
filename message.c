@@ -2536,12 +2536,14 @@ handle_request(struct neighbour *neigh, const unsigned char *prefix,
     if(!successor || successor == neigh) {
         /* We were about to forward a request to its requestor.  Try to
         find a different neighbour to forward the request to. */
-        struct babel_route *other_route;
+        if(route) {
+            struct babel_route *other_route;
 
-        other_route = find_best_route(route->src->id, prefix, plen, src_prefix, src_plen,
-                                    0, neigh);
-        if(other_route && route_metric(other_route) < INFINITY)
-            successor = other_route->neigh;
+            other_route = find_best_route(route->src->id, prefix, plen, src_prefix, src_plen,
+                                        0, neigh);
+            if(other_route && route_metric(other_route) < INFINITY)
+                successor = other_route->neigh;
+        }
     }
 
     if(!successor || successor == neigh)
