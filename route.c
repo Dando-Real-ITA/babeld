@@ -552,6 +552,8 @@ flush_route(struct babel_route *route)
         debugf("  -> not installed, nothing to do for kernel\n");
     }
 
+    int was_installed = route->installed;
+
     local_notify_route(route, LOCAL_FLUSH);
 
     {
@@ -621,16 +623,28 @@ flush_route(struct babel_route *route)
             resize_route_table(max_route_slots / 2);
     }
 
+    debugf("flush_route: after removal, update_ecmp=%d, i=%d, route_slots=%d\n",
+           update_ecmp, i, route_slots);
+    if(i < route_slots && routes[i] != NULL) {
+        int cmp = route_compare(NULL, src->prefix, src->plen,
+                                src->src_prefix, src->src_plen,
+                                routes[i]);
+        debugf("  routes[i] compare result=%d (0 means match)\n", cmp);
+    }
+
     if(update_ecmp && i < route_slots && routes[i] != NULL &&
        route_compare(NULL, src->prefix, src->plen,
                      src->src_prefix, src->src_plen,
                      routes[i]) == 0) {
         struct babel_route *primary = routes[i];
 
+        debugf("  -> calling refresh_installed_ranks on routes[%d]\n", i);
         /* An ECMP member was flushed. Let refresh_installed_ranks() handle
            the kernel update - it will detect the changed nexthop set and
            do a single FLUSH+ADD. */
         refresh_installed_ranks(primary);
+    } else {
+        debugf("  -> NOT calling refresh_installed_ranks (conditions not met)\n");
     }
 
     if(lost)
@@ -1117,6 +1131,7 @@ refresh_installed_ranks(struct babel_route *route)
     }
 
     count = collect_multipath_nexthops(route, nexthops, MAX_ECMP_NEXTHOPS, NULL);
+    debugf("refresh_installed_ranks: collect_multipath_nexthops returned %d nexthops\n", count);
     if(count == 0) {
         if(route_metric(route) < INFINITY) {
             route->installed = 1;
@@ -1191,6 +1206,8 @@ refresh_installed_ranks(struct babel_route *route)
 
     /* Detect if transitioning from single path or different multipath set */
     if(old_nexthop_count != count) {
+        debugf("  set_changed: old_nexthop_count (%d) != count (%d)\n",
+               old_nexthop_count, count);
         set_changed = 1;
     } else if(old_nexthop_count > 1) {
         /* Check if the multipath members changed */
@@ -1204,6 +1221,8 @@ refresh_installed_ranks(struct babel_route *route)
                 }
             }
             if(!found) {
+                debugf("  set_changed: nexthop %s not found in old set\n",
+                       format_address(nexthops[i].gate));
                 set_changed = 1;
                 break;
             }
