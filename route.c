@@ -1176,7 +1176,10 @@ refresh_installed_ranks(struct babel_route *route)
            format_prefix(route->src->prefix, route->src->plen),
            slot, (void*)head, group_size);
 
-    /* Record currently installed nexthops before refresh */
+    /* Record currently installed nexthops before refresh.
+       Use installed_table_count > 0 as the kernel-presence signal rather
+       than installed > 0: the installed flags may have already been zeroed
+       by a prior stale bookkeeping path while the kernel route still lives. */
     if(multipath_ecmp != ECMP_DISABLED) {
         r = head;
         while(r) {
@@ -1188,13 +1191,19 @@ refresh_installed_ranks(struct babel_route *route)
                 ifindex = r->neigh->ifp->ifindex;
             }
 
-            debugf("  member %p: installed=%d metric=%d via %s if %s\n",
-                   (void*)r, r->installed, route_metric(r),
-                   format_address(r->nexthop), ifname);
-            if(r->installed > 0) {
-                if(r->installed == 1 && old_primary == NULL)
-                    old_primary = r;
+            debugf("  member %p: installed=%d tables=%d metric=%d via %s if %s\n",
+                   (void*)r, r->installed, r->installed_table_count,
+                   route_metric(r), format_address(r->nexthop), ifname);
 
+            /* Primary: prefer installed==1 candidate, fall back to any
+               member with kernel presence (installed_table_count > 0). */
+            if(r->installed == 1 && old_primary == NULL)
+                old_primary = r;
+            else if(old_primary == NULL && r->installed_table_count > 0)
+                old_primary = r;
+
+            /* Collect kernel-present nexthops for change detection */
+            if(r->installed > 0 || r->installed_table_count > 0) {
                 int duplicate = 0;
                 for(int j = 0; j < old_nexthop_count; j++) {
                     if(old_nexthops[j].ifindex == ifindex &&
@@ -1265,13 +1274,25 @@ refresh_installed_ranks(struct babel_route *route)
         
         /* Detect transitions that require reprogramming kernel route. */
         if(old_nexthop_count != 1) {
+            /* Count changed: 0->1, 2+->1, etc. */
             set_changed = 1;
-        } else if(old_primary && primary && old_primary == primary &&
-                  old_primary->installed_table_count == 0) {
-            /* Bookkeeping was lost: force a one-time resync so stale
-               kernel entries (including unreachable siblings) are flushed. */
-            debugf("  set_changed: forcing resync (single nexthop, table state lost)\n");
-            set_changed = 1;
+        } else if(primary && old_nexthop_count == 1) {
+            /* Count stayed 1 — but the actual nexthop may have changed
+               (e.g. A retracted, B remains: old gate=A, new gate=B). */
+            if(primary->neigh && primary->neigh->ifp) {
+                unsigned int new_ifindex = primary->neigh->ifp->ifindex;
+                if(old_nexthops[0].ifindex != new_ifindex ||
+                   memcmp(old_nexthops[0].gate, primary->nexthop, 16) != 0) {
+                    debugf("  set_changed: single nexthop address changed\n");
+                    set_changed = 1;
+                }
+            }
+            if(!set_changed && old_primary &&
+               old_primary->installed_table_count == 0) {
+                /* Bookkeeping was lost: force a one-time resync */
+                debugf("  set_changed: forcing resync (table state lost)\n");
+                set_changed = 1;
+            }
         }
         goto update_kernel_if_needed;
     }
@@ -1354,7 +1375,13 @@ update_kernel_if_needed:
             if(rc < 0 && errno != ESRCH && errno != ENOENT)
                 perror("kernel_route(FLUSH ecmp refresh)");
 
-            old_primary->installed_table_count = 0;
+            /* Clear table bookkeeping for every member — they all shared
+               the same kernel entry so they are all gone now. */
+            r = head;
+            while(r) {
+                r->installed_table_count = 0;
+                r = r->multipath;
+            }
         }
 
         /* Then ADD the new route if we have a valid primary */
@@ -1369,6 +1396,22 @@ update_kernel_if_needed:
                               &primary->installed_table_count);
             if(rc < 0 && errno != EEXIST)
                 perror("kernel_route(ADD ecmp refresh)");
+
+            /* Propagate the installed table list to all secondary ECMP members.
+               They all share the same kernel multipath entry so they must
+               report the same tables — this is also what lets Bug-1 detection
+               work correctly on the next refresh cycle. */
+            if(primary->installed_table_count > 0) {
+                r = head;
+                while(r) {
+                    if(r != primary && r->installed > 1) {
+                        memcpy(r->installed_tables, primary->installed_tables,
+                               primary->installed_table_count * sizeof(int));
+                        r->installed_table_count = primary->installed_table_count;
+                    }
+                    r = r->multipath;
+                }
+            }
         }
     }
 
