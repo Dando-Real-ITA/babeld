@@ -1666,35 +1666,42 @@ change_route_metric(struct babel_route *route,
     int oldmetric = metric_to_kernel(route_metric(route)),
         newmetric = metric_to_kernel(MIN(refmetric + cost + add, INFINITY));
 
+    if(multipath_ecmp != ECMP_DISABLED && route->installed > 0) {
+        /* For ECMP, always refresh when the route is installed, regardless of
+           whether oldmetric == newmetric.  A route may have had its metric
+           computed as KERNEL_INFINITY already (e.g. neighbour cost blew up)
+           while still holding installed > 1 — in that case oldmetric ==
+           newmetric but the kernel nexthop set still needs to be corrected.
+           refresh_installed_ranks() has its own set_changed guard so spurious
+           calls are cheap. */
+        route_smoothed_metric(route);
+
+        route->refmetric = refmetric;
+        route->cost = cost;
+        route->add_metric = add;
+
+        if(smoothing_half_life == 0) {
+            route->smoothed_metric = route_metric(route);
+            route->smoothed_metric_time = now.tv_sec;
+        }
+
+        debugf("change_route_metric(%s from %s, %d -> %d) [ecmp installed=%d]\n",
+               format_prefix(route->src->prefix, route->src->plen),
+               format_prefix(route->src->src_prefix, route->src->src_plen),
+               oldmetric, newmetric, route->installed);
+
+        /* Let refresh_installed_ranks() handle ALL kernel updates for ECMP.
+           It computes the correct nexthop set (excluding retracted routes)
+           and does a single FLUSH+ADD. Doing ROUTE_MODIFY here would cause
+           duplicate/conflicting kernel operations. */
+        refresh_installed_ranks(route);
+
+        local_notify_route(route, LOCAL_CHANGE);
+        return;
+    }
+
     if(route->installed > 0 && oldmetric != newmetric) {
         int rc;
-
-        if(multipath_ecmp != ECMP_DISABLED) {
-            route_smoothed_metric(route);
-
-            route->refmetric = refmetric;
-            route->cost = cost;
-            route->add_metric = add;
-
-            if(smoothing_half_life == 0) {
-                route->smoothed_metric = route_metric(route);
-                route->smoothed_metric_time = now.tv_sec;
-            }
-
-            debugf("change_route_metric(%s from %s, %d -> %d) [ecmp]\n",
-                   format_prefix(route->src->prefix, route->src->plen),
-                   format_prefix(route->src->src_prefix, route->src->src_plen),
-                   oldmetric, newmetric);
-
-            /* Let refresh_installed_ranks() handle ALL kernel updates for ECMP.
-               It computes the correct nexthop set (excluding retracted routes)
-               and does a single FLUSH+ADD. Doing ROUTE_MODIFY here would cause
-               duplicate/conflicting kernel operations. */
-            refresh_installed_ranks(route);
-
-            local_notify_route(route, LOCAL_CHANGE);
-            return;
-        }
 
         debugf("change_route_metric(%s from %s, %d -> %d)\n",
                format_prefix(route->src->prefix, route->src->plen),
