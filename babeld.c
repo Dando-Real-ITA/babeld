@@ -32,6 +32,7 @@ THE SOFTWARE.
 #include <time.h>
 #include <signal.h>
 #include <assert.h>
+#include <execinfo.h>
 
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -660,6 +661,14 @@ babel_main(char **interface_names, int num_interface_names)
         if(timeval_compare(&tv, &now) > 0) {
             int maxfd = 0;
             timeval_minus(&tv, &tv, &now);
+            
+            /* In debug mode, enforce a minimum 1-second delay to avoid
+               spamming logs and reducing CPU consumption. */
+            if(debug > 0 && (tv.tv_sec < 1 || (tv.tv_sec == 1 && tv.tv_usec > 0))) {
+                tv.tv_sec = 1;
+                tv.tv_usec = 0;
+            }
+            
             FD_SET(protocol_socket, &readfds);
             maxfd = MAX(maxfd, protocol_socket);
             FD_SET(kernel_socket, &readfds);
@@ -1023,6 +1032,25 @@ sigreopening(int signo)
 }
 
 static void
+sigsegv_handler(int signo, siginfo_t *info, void *ctx)
+{
+    /* Write backtrace using only async-signal-safe calls.
+       backtrace_symbols_fd writes directly to a file descriptor.
+       When daemonised, stderr (fd 2) has already been dup2'd to the
+       logfile by reopen_logfile(), so this goes to the right place. */
+    void *bt[64];
+    int n = backtrace(bt, 64);
+    const char msg[] = "\n*** babeld SIGSEGV - backtrace:\n";
+    if(write(STDERR_FILENO, msg, sizeof(msg) - 1)) {}
+    backtrace_symbols_fd(bt, n, STDERR_FILENO);
+    const char msg2[] = "*** end backtrace\n";
+    if(write(STDERR_FILENO, msg2, sizeof(msg2) - 1)) {}
+    /* Re-raise: SA_RESETHAND restores default SIGSEGV handler so this
+       terminates with a core dump. */
+    raise(SIGSEGV);
+}
+
+static void
 init_signals(void)
 {
     struct sigaction sa;
@@ -1071,15 +1099,23 @@ init_signals(void)
     sa.sa_flags = 0;
     sigaction(SIGINFO, &sa, NULL);
 #endif
+
+    sigemptyset(&ss);
+    sa.sa_sigaction = sigsegv_handler;
+    sa.sa_mask = ss;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigaction(SIGSEGV, &sa, NULL);
 }
 
 static void
 dump_route(FILE *out, struct babel_route *route)
 {
-    const unsigned char *nexthop =
-        memcmp(route->nexthop, route->neigh->address, 16) == 0 ?
-        NULL : route->nexthop;
+    const unsigned char *neigh_addr = zeroes;
+    const char *neigh_ifname = "(none)";
+    const unsigned char *nexthop = route->nexthop;
     char tables_buf[384];
+    char weight_buf[32];
+    int weight;
     int i, written = 0;
 
     /* Build tables string from array */
@@ -1094,21 +1130,36 @@ dump_route(FILE *out, struct babel_route *route)
         }
     }
 
+    weight = route_ecmp_weight(route);
+    if(weight > 0)
+        snprintf(weight_buf, sizeof(weight_buf), "%d", weight);
+    else
+        snprintf(weight_buf, sizeof(weight_buf), "-");
+
+    if(route->neigh && route->neigh->ifp) {
+        neigh_addr = route->neigh->address;
+        neigh_ifname = route->neigh->ifp->name;
+        nexthop = memcmp(route->nexthop, neigh_addr, 16) == 0 ? NULL : route->nexthop;
+    }
+
     fprintf(out, "%s from %s metric %d (%d) refmetric %d id %s "
-            "seqno %d age %d via %s neigh %s%s%s%s tables %s\n",
+            "seqno %d age %d via %s neigh %s%s%s%s ecmp %s tables %s installed-rank %d weight %s\n",
             format_prefix(route->src->prefix, route->src->plen),
             format_prefix(route->src->src_prefix, route->src->src_plen),
             route_metric(route), route_smoothed_metric(route), route->refmetric,
             format_eui64(route->src->id),
             (int)route->seqno,
             (int)(now.tv_sec - route->time),
-            route->neigh->ifp->name,
-            format_address(route->neigh->address),
+            neigh_ifname,
+            format_address(neigh_addr),
             nexthop ? " nexthop " : "",
             nexthop ? format_address(nexthop) : "",
             route->installed ? " (installed)" :
             route_feasible(route) ? " (feasible)" : "",
-            tables_buf);
+            route_ecmp_mode(multipath_ecmp),
+            tables_buf,
+            route->installed,
+            weight_buf);
 }
 
 static void
@@ -1156,7 +1207,9 @@ dump_tables(FILE *out)
 
     when = time(NULL);
 
-    fprintf(out, "Daemon version %s\n", BABELD_VERSION);
+        fprintf(out, "Daemon version %s\n", BABELD_VERSION);
+        fprintf(out, "ECMP mode %s window %d\n",
+            route_ecmp_mode(multipath_ecmp), ecmp_metric_window);
     fprintf(out, "My id %s seqno %d at %s\n",
             format_eui64(myid), myseqno,
             dump_timestamp(when, time_buf, sizeof(time_buf)));
@@ -1166,18 +1219,26 @@ dump_tables(FILE *out)
     }
 
     FOR_ALL_NEIGHBOURS(neigh) {
+        const char *ifname = "(none)";
+        int isup = 0;
         neighbour_count++;
+
+        if(neigh->ifp) {
+            ifname = neigh->ifp->name;
+            isup = if_up(neigh->ifp);
+        }
+
         fprintf(out, "Neighbour %s dev %s reach %04x ureach %04x "
                 "rxcost %u txcost %d rtt %s rttcost %u%s.\n",
                 format_address(neigh->address),
-                neigh->ifp->name,
+                ifname,
                 neigh->hello.reach,
                 neigh->uhello.reach,
                 neighbour_rxcost(neigh),
                 neigh->txcost,
                 format_thousands(neigh->rtt),
                 neighbour_rttcost(neigh),
-                if_up(neigh->ifp) ? "" : " (down)");
+                isup ? "" : " (down)");
     }
 
     xroutes = xroute_stream();
@@ -1197,7 +1258,7 @@ dump_tables(FILE *out)
             if(route == NULL) break;
             count_dump_route(&route_counters,
                      route->src->prefix, route->src->plen,
-                     route->installed);
+                     route->installed == 1);
             dump_route(out, route);
         }
         route_stream_done(routes);

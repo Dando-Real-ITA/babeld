@@ -36,19 +36,40 @@ struct babel_route {
     unsigned short hold_time;    /* in seconds */
     unsigned short smoothed_metric; /* for route selection */
     time_t smoothed_metric_time;
-    short installed;
+    short installed; /* 0: not installed, 1: primary installed, >1: ECMP nexthop rank */
+    unsigned char multipath_ever; /* 1 if this group ever had 2+ nexthops installed */
     int installed_tables[MAX_TABLES_PER_FILTER];  /* Array of kernel routing tables */
     int installed_table_count;                     /* Number of tables route is installed in */
     struct babel_route *next;
+    struct babel_route *multipath;
 };
+
+#ifndef MAX_ECMP_NEXTHOPS
+#define MAX_ECMP_NEXTHOPS 32
+#endif
+
+#ifndef DEFAULT_ECMP_METRIC_WINDOW
+#define DEFAULT_ECMP_METRIC_WINDOW 300
+#endif
+
+/* multipath_ecmp values */
+#define ECMP_DISABLED 0  /* no multipath */
+#define ECMP_EQUAL    1  /* equal-cost multipath, uniform weights;
+                            kernel only updated on nexthop-set changes or retractions */
+#define ECMP_WEIGHT   2  /* metric-proportional weights;
+                            kernel updated on all metric changes */
 
 struct route_stream;
 
 extern struct babel_route **routes;
 extern int kernel_metric, allow_duplicates, reflect_kernel_metric, has_duplicate_default;
+extern int multipath_ecmp;
+extern int ecmp_metric_window;
 extern int route_slots;
 extern int smoothing_half_life;
 extern int two_to_the_one_over_hl; /* 2^(1/hl) * 0x10000 */
+
+const char *route_ecmp_mode(int ecmp_mode);
 
 static inline int
 route_metric(const struct babel_route *route)
@@ -86,15 +107,22 @@ void route_stream_done(struct route_stream *stream);
 int metric_to_kernel(int metric);
 void install_route(struct babel_route *route);
 void uninstall_route(struct babel_route *route);
+int change_route(int operation, const struct babel_route *route, int metric,
+                 const unsigned char *new_next_hop,
+                 int new_ifindex, int newmetric,
+                 const struct source *newsrc,
+                 int *installed_tables, int *installed_table_count);
 void change_route_metric(struct babel_route *route,
                          unsigned refmetric,
                          unsigned cost,
                          unsigned add);
+void refresh_installed_ranks(struct babel_route *route);
 int route_feasible(struct babel_route *route);
 int update_feasible(struct source *src,
                     unsigned short seqno, unsigned short refmetric);
 void change_smoothing_half_life(int half_life);
 int route_smoothed_metric(struct babel_route *route);
+int route_ecmp_weight(struct babel_route *route);
 struct babel_route *find_best_route(const unsigned char *id,
                                     const unsigned char *prefix,
                                     unsigned char plen,

@@ -37,6 +37,12 @@ struct kernel_route {
     unsigned char gw[16];
 };
 
+struct kernel_nexthop {
+    unsigned char gate[16];
+    unsigned int ifindex;
+    unsigned short weight;
+};
+
 struct kernel_addr {
     struct in6_addr addr;
     unsigned int ifindex;
@@ -88,6 +94,16 @@ int kernel_route(int operation, int table,
                  const unsigned char *newgate, int newifindex,
                  unsigned int newmetric, int newtable,
                  const unsigned char *newpref_src);
+int kernel_route_multipath(int operation, int table,
+                           const unsigned char *dest, unsigned short plen,
+                           const unsigned char *src, unsigned short src_plen,
+                           const unsigned char *pref_src,
+                           unsigned int metric,
+                           unsigned int newmetric,
+                           const struct kernel_nexthop *nexthops,
+                           int nexthop_count,
+                           int newtable,
+                           const unsigned char *newpref_src);
 int kernel_dump(int operation, struct kernel_filter *filter);
 int kernel_callback(struct kernel_filter *filter);
 int if_eui64(char *ifname, int ifindex, unsigned char *eui);

@@ -27,6 +27,7 @@ THE SOFTWARE.
 #include <assert.h>
 #include <sys/time.h>
 #include <netinet/in.h>
+#include <net/if.h>
 
 #include "babeld.h"
 #include "kernel.h"
@@ -319,11 +320,18 @@ flush_xroute_ext(struct xroute *xroute, int send_updates, int hard_withdraw)
 {
     int i;
     int use_hard_withdraw;
+    int fast_local_withdraw = 0;
+    char ifname[IF_NAMESIZE];
     unsigned char prefix[16], plen;
     unsigned char src_prefix[16], src_plen;
     struct babel_route *route;
 
     use_hard_withdraw = hard_withdraw && enable_hard_withdraw;
+
+    if(send_updates && xroute->ifindex > 0 &&
+       if_indextoname(xroute->ifindex, ifname) != NULL &&
+       strcmp(ifname, "lo") == 0)
+        fast_local_withdraw = 1;
 
     /* We'll use these after we free the xroute */
     memcpy(prefix, xroute->prefix, 16);
@@ -360,11 +368,27 @@ flush_xroute_ext(struct xroute *xroute, int send_updates, int hard_withdraw)
     if(route != NULL && route_metric(route) < INFINITY &&
        route_feasible(route)) {
         install_route(route);
-        if(send_updates)
+        if(send_updates) {
+            if(fast_local_withdraw) {
+                update_myseqno();
+                send_update_resend_with_id(NULL,
+                                           prefix, plen,
+                                           src_prefix, src_plen,
+                                           myseqno, myid,
+                                           UPDATE_FLAG_HARD_WITHDRAW);
+            }
             send_update(NULL, 0, prefix, plen, src_prefix, src_plen);
+        }
     } else {
         if(send_updates) {
-            if(use_hard_withdraw) {
+            if(fast_local_withdraw) {
+                update_myseqno();
+                send_update_resend_with_id(NULL,
+                                           prefix, plen,
+                                           src_prefix, src_plen,
+                                           myseqno, myid,
+                                           UPDATE_FLAG_HARD_WITHDRAW);
+            } else if(use_hard_withdraw) {
                 send_update_resend_with_id(NULL,
                                            prefix, plen,
                                            src_prefix, src_plen,

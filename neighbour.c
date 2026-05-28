@@ -341,6 +341,9 @@ neighbour_rxcost(struct neighbour *neigh)
 unsigned
 neighbour_rttcost(struct neighbour *neigh)
 {
+    if(neigh == NULL || neigh->ifp == NULL)
+        return 0;
+
     struct interface *ifp = neigh->ifp;
 
     if(!ifp->max_rtt_penalty || !valid_rtt(neigh))
@@ -365,6 +368,9 @@ unsigned
 neighbour_cost(struct neighbour *neigh)
 {
     unsigned a, b, cost;
+
+    if(neigh == NULL || neigh->ifp == NULL)
+        return INFINITY;
 
     if(!if_up(neigh->ifp))
         return INFINITY;

@@ -1073,6 +1073,28 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
             reflect_kernel_metric = b;
         else
             abort();
+    } else if(strcmp(token, "ecmp") == 0) {
+        char *val;
+        c = getword(c, &val, gnc, closure);
+        if(c < -1)
+            goto error;
+        if(strcmp(val, "false") == 0 || strcmp(val, "no") == 0)
+            multipath_ecmp = ECMP_DISABLED;
+        else if(strcmp(val, "true") == 0 || strcmp(val, "yes") == 0)
+            multipath_ecmp = ECMP_EQUAL;
+        else if(strcmp(val, "weight") == 0)
+            multipath_ecmp = ECMP_WEIGHT;
+        else {
+            free(val);
+            goto error;
+        }
+        free(val);
+    } else if(strcmp(token, "ecmp-metric-window") == 0) {
+        int window;
+        c = getint(c, &window, gnc, closure);
+        if(c < -1 || window < 0 || window > 65535)
+            goto error;
+        ecmp_metric_window = window;
     } else if(strcmp(token, "protocol-group") == 0) {
         unsigned char *group = NULL;
         c = getip(c, &group, NULL, gnc, closure);

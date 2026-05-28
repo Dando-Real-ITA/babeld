@@ -46,16 +46,34 @@ int route_slots = 0;
 int kernel_metric = 0, reflect_kernel_metric = 0;
 int allow_duplicates = -1;
 int has_duplicate_default = 0;
-int diversity_factor = 256;     /* in units of 1/256 */
+int multipath_ecmp = 0;
+int ecmp_metric_window = DEFAULT_ECMP_METRIC_WINDOW;
 
 int smoothing_half_life = 0;
 int two_to_the_one_over_hl = 0; /* 2^(1/hl) * 0x10000 */
 static int kernel_route_operation_depth = 0;
 
+static void refresh_installed_ranks_ext(struct babel_route *route,
+                                        int force_reprogram);
+
 int
 kernel_route_operation_in_progress(void)
 {
     return kernel_route_operation_depth > 0;
+}
+
+const char *
+route_ecmp_mode(int ecmp_mode)
+{
+    switch(ecmp_mode) {
+    case ECMP_EQUAL:
+        return "equal";
+    case ECMP_WEIGHT:
+        return "weight";
+    case ECMP_DISABLED:
+    default:
+        return "disabled";
+    }
 }
 
 /* We maintain a list of "slots", ordered by prefix.  Every slot
@@ -153,21 +171,200 @@ find_route(const unsigned char *id,
            const unsigned char *src_prefix, unsigned char src_plen,
            struct neighbour *neigh)
 {
+    struct babel_route *head;
     struct babel_route *route;
     int i = find_route_slot(id, prefix, plen, src_prefix, src_plen, NULL);
 
     if(i < 0)
         return NULL;
 
-    route = routes[i];
-
-    while(route) {
-        if(route->neigh == neigh)
-            return route;
-        route = route->next;
+    head = routes[i];
+    while(head) {
+        route = head;
+        while(route) {
+            if(route->neigh == neigh)
+                return route;
+            route = route->multipath;
+        }
+        head = head->next;
     }
 
     return NULL;
+}
+
+static int
+route_metric_distance(const struct babel_route *a, const struct babel_route *b)
+{
+    int am = route_metric(a);
+    int bm = route_metric(b);
+    int d;
+
+    if(am >= INFINITY || bm >= INFINITY)
+        return INFINITY;
+
+    d = am - bm;
+    if(d < 0)
+        d = -d;
+    return d;
+}
+
+static int
+route_metric_le(const struct babel_route *a, const struct babel_route *b)
+{
+    return route_metric(a) <= route_metric(b);
+}
+
+static struct babel_route *
+find_compatible_group_head(struct babel_route *head,
+                           const struct babel_route *route,
+                           struct babel_route **prev_return)
+{
+    struct babel_route *prev = NULL;
+
+    debugf("find_compatible_group_head: route metric=%d neigh=%s\n",
+           route_metric(route),
+           (route->neigh ? format_address(route->neigh->address) : "(null)"));
+
+    while(head) {
+        int distance = route_metric_distance(head, route);
+        debugf("  checking head metric=%d distance=%d window=%d\n",
+               route_metric(head), distance, ecmp_metric_window);
+        if(distance <= ecmp_metric_window) {
+            if(prev_return)
+                *prev_return = prev;
+            return head;
+        }
+        prev = head;
+        head = head->next;
+    }
+
+    if(prev_return)
+        *prev_return = NULL;
+    return NULL;
+}
+
+static void
+insert_multipath_member_sorted(struct babel_route *head,
+                               struct babel_route *route)
+{
+    struct babel_route *prev = head;
+    struct babel_route *cur = head->multipath;
+
+    while(cur && route_metric_le(cur, route)) {
+        prev = cur;
+        cur = cur->multipath;
+    }
+
+    prev->multipath = route;
+    route->multipath = cur;
+    route->next = NULL;
+}
+
+static void
+insert_group_head_sorted(int slot, struct babel_route *route)
+{
+    struct babel_route *prev = NULL;
+    struct babel_route *cur = routes[slot];
+
+    while(cur && route_metric_le(cur, route)) {
+        prev = cur;
+        cur = cur->next;
+    }
+
+    route->next = cur;
+    route->multipath = NULL;
+    if(prev)
+        prev->next = route;
+    else
+        routes[slot] = route;
+}
+
+static struct babel_route *
+find_group_head_for_route(int slot,
+                          const struct babel_route *route,
+                          struct babel_route **prev_head_return,
+                          struct babel_route **prev_mp_return)
+{
+    struct babel_route *prev_head = NULL;
+    struct babel_route *head;
+
+    if(slot < 0 || slot >= route_slots)
+        return NULL;
+
+    head = routes[slot];
+    while(head) {
+        struct babel_route *prev_mp = NULL;
+        struct babel_route *r = head;
+
+        while(r) {
+            if(r == route) {
+                if(prev_head_return)
+                    *prev_head_return = prev_head;
+                if(prev_mp_return)
+                    *prev_mp_return = prev_mp;
+                return head;
+            }
+            prev_mp = r;
+            r = r->multipath;
+        }
+
+        prev_head = head;
+        head = head->next;
+    }
+
+    return NULL;
+}
+
+static void
+rehome_route_to_installed_group(int slot,
+                                struct babel_route *installed,
+                                struct babel_route *route)
+{
+    struct babel_route *installed_head;
+    struct babel_route *route_head;
+    struct babel_route *prev_route_head = NULL;
+    struct babel_route *prev_mp = NULL;
+
+    if(slot < 0 || slot >= route_slots || installed == NULL || route == NULL)
+        return;
+
+    installed_head = find_group_head_for_route(slot, installed, NULL, NULL);
+    route_head = find_group_head_for_route(slot, route, &prev_route_head, &prev_mp);
+
+    if(installed_head == NULL || route_head == NULL)
+        return;
+
+    if(route_head == installed_head)
+        return;
+
+    if(route_metric_distance(installed_head, route) > ecmp_metric_window)
+        return;
+
+    debugf("rehome_route_to_installed_group: moving %p (%s) into group %p\n",
+           (void*)route, format_address(route->nexthop), (void*)installed_head);
+
+    if(route == route_head) {
+        if(route_head->multipath) {
+            struct babel_route *new_head = route_head->multipath;
+            new_head->next = route_head->next;
+            if(prev_route_head)
+                prev_route_head->next = new_head;
+            else
+                routes[slot] = new_head;
+        } else {
+            if(prev_route_head)
+                prev_route_head->next = route_head->next;
+            else
+                routes[slot] = route_head->next;
+        }
+    } else {
+        assert(prev_mp != NULL);
+        prev_mp->multipath = route->multipath;
+    }
+
+    route->multipath = NULL;
+    route->next = NULL;
+    insert_multipath_member_sorted(installed_head, route);
 }
 
 struct babel_route *
@@ -203,7 +400,7 @@ find_installed_route(const unsigned char *id,
             /* Valid index, match parameters */
             while (*index < route_slots && route_compare(NULL, prefix, plen, src_prefix, src_plen, routes[*index]) == 0) {
                 /* The route is valid and installed */
-                if (routes[*index]->installed)
+                if (routes[*index]->installed == 1)
                     return routes[(*index)++];
                 (*index)++;
             }
@@ -214,8 +411,18 @@ find_installed_route(const unsigned char *id,
 
     i = find_route_slot(id, prefix, plen, src_prefix, src_plen, NULL);
 
-    if(i >= 0 && routes[i]->installed)
-        return routes[i];
+    if(i >= 0) {
+        struct babel_route *head = routes[i];
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(r->installed == 1 && (!id || memcmp(r->src->id, id, 8) == 0))
+                    return r;
+                r = r->multipath;
+            }
+            head = head->next;
+        }
+    }
 
     return NULL;
 }
@@ -266,18 +473,49 @@ insert_route(struct babel_route *route)
         if(route_slots >= max_route_slots)
             return NULL;
         route->next = NULL;
+        route->multipath = NULL;
         if(n < route_slots)
             memmove(routes + n + 1, routes + n,
                     (route_slots - n) * sizeof(struct babel_route*));
         route_slots++;
         routes[n] = route;
-    } else {
+    } else if(multipath_ecmp == ECMP_DISABLED) {
         struct babel_route *r;
         r = routes[i];
         while(r->next)
             r = r->next;
         r->next = route;
         route->next = NULL;
+        route->multipath = NULL;
+    } else {
+        struct babel_route *prev_group = NULL;
+        struct babel_route *group_head =
+            find_compatible_group_head(routes[i], route, &prev_group);
+
+        debugf("insert_route: %s via %s, group_head=%p\n",
+               format_prefix(route->src->prefix, route->src->plen),
+               format_address(route->nexthop),
+               (void*)group_head);
+
+        if(group_head == NULL) {
+            debugf("  -> new group head\n");
+            insert_group_head_sorted(i, route);
+        } else if(route_metric(route) < route_metric(group_head)) {
+            struct babel_route *head_next = group_head->next;
+
+            debugf("  -> replacing head (lower metric)\n");
+            if(prev_group)
+                prev_group->next = route;
+            else
+                routes[i] = route;
+
+            route->next = head_next;
+            route->multipath = group_head;
+            group_head->next = NULL;
+        } else {
+            debugf("  -> multipath member of %p\n", (void*)group_head);
+            insert_multipath_member_sorted(group_head, route);
+        }
     }
 
     return route;
@@ -295,26 +533,133 @@ flush_route(struct babel_route *route)
     int i;
     struct source *src;
     unsigned oldmetric;
+    int has_alternate = 0;
+    int update_ecmp = 0;
     int lost = 0;
 
     oldmetric = route_metric(route);
     src = route->src;
 
-    if(route->installed) {
-        uninstall_route(route);
-        lost = 1;
-    }
+    debugf("flush_route: %s via %s installed=%d metric=%d\n",
+           format_prefix(route->src->prefix, route->src->plen),
+           format_address(route->nexthop),
+           route->installed, route_metric(route));
 
     i = find_route_slot(route->src->id,
                         route->src->prefix, route->src->plen,
                         route->src->src_prefix, route->src->src_plen, NULL);
     assert(i >= 0 && i < route_slots);
 
+    /* Debug: show all routes in this slot */
+    {
+        struct babel_route *dbg_head = routes[i];
+        int group_num = 0;
+        while(dbg_head) {
+            struct babel_route *dbg_r = dbg_head;
+            int member_num = 0;
+            while(dbg_r) {
+                debugf("  slot[%d] group[%d] member[%d]: installed=%d metric=%d via %s%s\n",
+                       i, group_num, member_num,
+                       dbg_r->installed, route_metric(dbg_r),
+                       format_address(dbg_r->nexthop),
+                       dbg_r == route ? " <-- FLUSHING" : "");
+                dbg_r = dbg_r->multipath;
+                member_num++;
+            }
+            dbg_head = dbg_head->next;
+            group_num++;
+        }
+    }
+
+    if(route->installed == 1) {
+        /* Primary route: check if there are other installed ECMP members
+           OR other routes in this slot that could potentially be installed */
+        struct babel_route *head = routes[i];
+        has_alternate = 0;
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(r != route && (r->installed > 0 || route_metric(r) < INFINITY)) {
+                    has_alternate = 1;
+                    debugf("  found alternate: via %s installed=%d metric=%d\n",
+                           format_address(r->nexthop), r->installed, route_metric(r));
+                    break;
+                }
+                r = r->multipath;
+            }
+            if(has_alternate)
+                break;
+            head = head->next;
+        }
+        
+        if(has_alternate) {
+            update_ecmp = 1;
+            debugf("  -> will update_ecmp\n");
+        } else {
+            debugf("  -> no alternate, uninstalling and marking lost\n");
+            uninstall_route(route);
+            lost = 1;
+        }
+    } else if(route->installed > 1) {
+        /* Secondary ECMP member: primary exists, need to reprogram */
+        update_ecmp = 1;
+        debugf("  -> secondary member, will update_ecmp\n");
+    } else {
+        debugf("  -> not installed, nothing to do for kernel\n");
+    }
+
     local_notify_route(route, LOCAL_FLUSH);
 
-    if(route == routes[i]) {
-        routes[i] = route->next;
-        route->next = NULL;
+    {
+        struct babel_route *prev_head = NULL;
+        struct babel_route *head = routes[i];
+        int removed = 0;
+
+        while(head) {
+            if(head == route) {
+                if(head->multipath) {
+                    struct babel_route *new_head = head->multipath;
+                    new_head->next = head->next;
+                    if(prev_head)
+                        prev_head->next = new_head;
+                    else
+                        routes[i] = new_head;
+                    head->next = NULL;
+                    head->multipath = NULL;
+                } else {
+                    if(prev_head)
+                        prev_head->next = head->next;
+                    else
+                        routes[i] = head->next;
+                    head->next = NULL;
+                }
+                removed = 1;
+                break;
+            }
+
+            {
+                struct babel_route *prev_mp = head;
+                struct babel_route *mp = head->multipath;
+                while(mp) {
+                    if(mp == route) {
+                        prev_mp->multipath = mp->multipath;
+                        mp->multipath = NULL;
+                        removed = 1;
+                        break;
+                    }
+                    prev_mp = mp;
+                    mp = mp->multipath;
+                }
+            }
+
+            if(removed)
+                break;
+
+            prev_head = head;
+            head = head->next;
+        }
+
+        assert(removed);
         destroy_route(route);
 
         if(routes[i] == NULL) {
@@ -330,13 +675,33 @@ flush_route(struct babel_route *route)
             resize_route_table(0);
         else if(max_route_slots > 8 && route_slots < max_route_slots / 4)
             resize_route_table(max_route_slots / 2);
+    }
+
+    debugf("flush_route: after removal, update_ecmp=%d, i=%d, route_slots=%d\n",
+           update_ecmp, i, route_slots);
+    if(i < route_slots && routes[i] != NULL) {
+        int cmp = route_compare(NULL, src->prefix, src->plen,
+                                src->src_prefix, src->src_plen,
+                                routes[i]);
+        debugf("  routes[i] compare result=%d (0 means match)\n", cmp);
+    }
+
+    if(update_ecmp && i < route_slots && routes[i] != NULL &&
+       route_compare(NULL, src->prefix, src->plen,
+                     src->src_prefix, src->src_plen,
+                     routes[i]) == 0) {
+        struct babel_route *primary = routes[i];
+
+        debugf("  -> calling refresh_installed_ranks on routes[%d]\n", i);
+        /* An ECMP member was flushed. Let refresh_installed_ranks() handle
+           the kernel update - it will detect the changed nexthop set and
+           do a single FLUSH+ADD.
+           Force reprogramming here: the removed member is already detached
+           from the in-memory group, so normal set-diff detection may not see
+           the old kernel nexthop set. */
+        refresh_installed_ranks_ext(primary, 1);
     } else {
-        struct babel_route *r = routes[i];
-        while(r->next != route)
-            r = r->next;
-        r->next = route->next;
-        route->next = NULL;
-        destroy_route(route);
+        debugf("  -> NOT calling refresh_installed_ranks (conditions not met)\n");
     }
 
     if(lost)
@@ -350,12 +715,10 @@ flush_all_routes()
 {
     int i;
 
-    /* Start from the end, to avoid shifting the table. */
     i = route_slots - 1;
     while(i >= 0) {
         while(i < route_slots) {
-            /* Uninstall first, to avoid calling route_lost. */
-            if(routes[i]->installed)
+            if(routes[i]->installed == 1)
                 uninstall_route(routes[i]);
             flush_route(routes[i]);
         }
@@ -372,14 +735,17 @@ flush_neighbour_routes(struct neighbour *neigh)
 
     i = 0;
     while(i < route_slots) {
-        struct babel_route *r;
-        r = routes[i];
-        while(r) {
-            if(r->neigh == neigh) {
-                flush_route(r);
-                goto again;
+        struct babel_route *head = routes[i];
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(r->neigh == neigh) {
+                    flush_route(r);
+                    goto again;
+                }
+                r = r->multipath;
             }
-            r = r->next;
+            head = head->next;
         }
         i++;
     again:
@@ -394,15 +760,19 @@ flush_interface_routes(struct interface *ifp, int v4only)
 
     i = 0;
     while(i < route_slots) {
-        struct babel_route *r;
-        r = routes[i];
-        while(r) {
-            if(r->neigh->ifp == ifp &&
-               (!v4only || v4mapped(r->nexthop))) {
-                flush_route(r);
-                goto again;
+        struct babel_route *head = routes[i];
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(r->neigh && r->neigh->ifp &&
+                   r->neigh->ifp == ifp &&
+                   (!v4only || v4mapped(r->nexthop))) {
+                    flush_route(r);
+                    goto again;
+                }
+                r = r->multipath;
             }
-            r = r->next;
+            head = head->next;
         }
         i++;
     again:
@@ -413,6 +783,7 @@ flush_interface_routes(struct interface *ifp, int v4only)
 struct route_stream {
     int installed;
     int index;
+    struct babel_route *head;
     struct babel_route *next;
 };
 
@@ -426,38 +797,60 @@ route_stream(int installed)
         return NULL;
 
     stream->installed = installed;
-    stream->index = installed ? 0 : -1;
+    stream->index = -1;
+    stream->head = NULL;
     stream->next = NULL;
 
     return stream;
 }
 
+static struct babel_route *
+route_stream_next_any(struct route_stream *stream)
+{
+    while(1) {
+        if(stream->next == NULL) {
+            stream->index++;
+            while(stream->index < route_slots && routes[stream->index] == NULL)
+                stream->index++;
+            if(stream->index >= route_slots)
+                return NULL;
+            stream->head = routes[stream->index];
+            stream->next = stream->head;
+            return stream->next;
+        }
+
+        if(stream->next->multipath) {
+            stream->next = stream->next->multipath;
+            return stream->next;
+        }
+
+        if(stream->head && stream->head->next) {
+            stream->head = stream->head->next;
+            stream->next = stream->head;
+            return stream->next;
+        } else {
+            stream->head = NULL;
+            stream->next = NULL;
+        }
+    }
+}
+
 struct babel_route *
 route_stream_next(struct route_stream *stream)
 {
+    struct babel_route *next;
+
     if(stream->installed) {
-        while(stream->index < route_slots) {
-            if(routes[stream->index]->installed)
-                break;
-            else
-                stream->index++;
-        }
-        if(stream->index < route_slots)
-            return routes[stream->index++];
-        else
-            return NULL;
-    } else {
-        struct babel_route *next;
-        if(!stream->next) {
-            stream->index++;
-            if(stream->index >= route_slots)
+        while(1) {
+            next = route_stream_next_any(stream);
+            if(next == NULL)
                 return NULL;
-            stream->next = routes[stream->index];
+            if(next->installed == 1)
+                return next;
         }
-        next = stream->next;
-        stream->next = next->next;
-        return next;
     }
+
+    return route_stream_next_any(stream);
 }
 
 void
@@ -479,35 +872,678 @@ metric_to_kernel(int metric)
         }
 }
 
-/* This is used to maintain the invariant that the installed route is at
-   the head of the list. */
+static unsigned int
+route_ifindex_or_zero(const struct babel_route *route)
+{
+    if(route && route->neigh && route->neigh->ifp)
+        return route->neigh->ifp->ifindex;
+    return 0;
+}
+
 static void
 move_installed_route(struct babel_route *route, int i)
 {
-    assert(i >= 0 && i < route_slots);
-    assert(route->installed);
+    struct babel_route *prev_head = NULL;
+    struct babel_route *head = routes[i];
+    struct babel_route *group_head = NULL;
+    struct babel_route *group_prev_head = NULL;
+    struct babel_route *prev_mp = NULL;
 
-    if(route != routes[i]) {
-        struct babel_route *r = routes[i];
-        while(r->next != route)
-            r = r->next;
-        r->next = route->next;
+    assert(i >= 0 && i < route_slots);
+    assert(route->installed == 1);
+
+    while(head) {
+        if(head == route) {
+            group_head = head;
+            group_prev_head = prev_head;
+            break;
+        }
+
+        prev_mp = head;
+        {
+            struct babel_route *mp = head->multipath;
+            while(mp) {
+                if(mp == route) {
+                    group_head = head;
+                    group_prev_head = prev_head;
+                    break;
+                }
+                prev_mp = mp;
+                mp = mp->multipath;
+            }
+        }
+
+        if(group_head)
+            break;
+
+        prev_head = head;
+        head = head->next;
+    }
+
+    if(group_head == NULL)
+        return;
+
+    if(group_head != route) {
+        prev_mp->multipath = route->multipath;
+        route->multipath = group_head;
+        route->next = group_head->next;
+        group_head->next = NULL;
+
+        if(group_prev_head)
+            group_prev_head->next = route;
+        else
+            routes[i] = route;
+    }
+
+    if(routes[i] != route) {
+        struct babel_route *p = group_prev_head;
+        if(p == NULL) {
+            p = routes[i];
+            while(p && p->next != route)
+                p = p->next;
+        }
+        if(p)
+            p->next = route->next;
         route->next = routes[i];
         routes[i] = route;
     }
 }
 
 static int
+route_old(struct babel_route *route)
+{
+    return route->time < now.tv_sec - route->hold_time * 7 / 8;
+}
+
+static int
+route_expired(struct babel_route *route)
+{
+    return route->time < now.tv_sec - route->hold_time;
+}
+
+static int
+find_route_slot_for_route(const struct babel_route *route)
+{
+    return find_route_slot(route->src->id,
+                           route->src->prefix, route->src->plen,
+                           route->src->src_prefix, route->src->src_plen,
+                           NULL);
+}
+
+static int
+group_has_installed_member(const struct babel_route *route)
+{
+    int i;
+    struct babel_route *head;
+    struct babel_route *r;
+
+    i = find_route_slot_for_route(route);
+    if(i < 0)
+        return 0;
+
+    head = find_group_head_for_route(i, route, NULL, NULL);
+    if(head == NULL)
+        return 0;
+
+    r = head;
+    while(r) {
+        if(r->installed > 0)
+            return 1;
+        r = r->multipath;
+    }
+
+    return 0;
+}
+
+static void
+clear_installed_ranks(const struct babel_route *route, int clear_tables)
+{
+    int i;
+    struct babel_route *head;
+    struct babel_route *r;
+
+    i = find_route_slot_for_route(route);
+    if(i < 0)
+        return;
+
+    head = find_group_head_for_route(i, route, NULL, NULL);
+    if(head == NULL)
+        return;
+
+    r = head;
+    while(r) {
+        r->installed = 0;
+        if(clear_tables)
+            r->installed_table_count = 0;
+        r = r->multipath;
+    }
+}
+
+static int
+metric_to_ecmp_weight(int metric, int min_metric)
+{
+    int base = 5;
+    int numerator;
+    int denominator;
+    int weight;
+
+    if(metric < 0)
+        metric = 0;
+    if(min_metric < 0)
+        min_metric = 0;
+
+    numerator = base * (min_metric + 256);
+    denominator = metric + 256;
+    if(denominator <= 0)
+        denominator = 1;
+
+    weight = numerator / denominator;
+    if(weight < 1)
+        weight = 1;
+    if(weight > 256)
+        weight = 256;
+    return weight;
+}
+
+static int
+collect_multipath_nexthops(const struct babel_route *route,
+                          struct kernel_nexthop *nexthops,
+                          int max_nexthops,
+                          int *best_metric_out)
+{
+    int i;
+    int best_metric = INFINITY;
+    int min_metric = INFINITY;
+    int count = 0;
+    int collected_metrics[MAX_ECMP_NEXTHOPS];
+    struct babel_route *head;
+    struct babel_route *r;
+
+    i = find_route_slot(route->src->id,
+                        route->src->prefix, route->src->plen,
+                        route->src->src_prefix, route->src->src_plen,
+                        NULL);
+    if(i < 0)
+        return 0;
+
+    head = find_group_head_for_route(i, route, NULL, NULL);
+    if(head == NULL)
+        return 0;
+
+    r = head;
+    while(r) {
+        int metric;
+        if(r->neigh == NULL || r->neigh->ifp == NULL ||
+           route_expired(r) || !route_feasible(r)) {
+            r = r->multipath;
+            continue;
+        }
+
+        metric = route_metric(r);
+        if(metric >= INFINITY) {
+            r = r->multipath;
+            continue;
+        }
+
+        if(metric < best_metric)
+            best_metric = metric;
+
+        r = r->multipath;
+    }
+
+    if(best_metric >= INFINITY)
+        return 0;
+    min_metric = best_metric;
+
+    r = head;
+    while(r && count < max_nexthops) {
+        int metric;
+        int j;
+        int duplicate = 0;
+
+        if(r->neigh == NULL || r->neigh->ifp == NULL ||
+           route_expired(r) || !route_feasible(r)) {
+            r = r->multipath;
+            continue;
+        }
+
+        metric = route_metric(r);
+        if(metric >= INFINITY) {
+            r = r->multipath;
+            continue;
+        }
+
+        if(metric > best_metric + ecmp_metric_window) {
+            r = r->multipath;
+            continue;
+        }
+
+        for(j = 0; j < count; j++) {
+            if(nexthops[j].ifindex == r->neigh->ifp->ifindex &&
+               memcmp(nexthops[j].gate, r->nexthop, 16) == 0) {
+                duplicate = 1;
+                break;
+            }
+        }
+
+        if(!duplicate) {
+            memcpy(nexthops[count].gate, r->nexthop, 16);
+            nexthops[count].ifindex = r->neigh->ifp->ifindex;
+            collected_metrics[count] = metric;
+            nexthops[count].weight = 1;
+            count++;
+        }
+
+        r = r->multipath;
+    }
+
+    if(multipath_ecmp == ECMP_WEIGHT) {
+        for(i = 0; i < count; i++)
+            nexthops[i].weight = metric_to_ecmp_weight(collected_metrics[i],
+                                                       min_metric);
+    }
+
+    if(best_metric_out)
+        *best_metric_out = best_metric;
+
+    return count;
+}
+
+static void
+refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
+{
+    int slot, i, count;
+    struct babel_route *head;
+    struct babel_route *r;
+    struct babel_route *primary = NULL;
+    struct babel_route *old_primary = NULL;
+    struct kernel_nexthop nexthops[MAX_ECMP_NEXTHOPS];
+    struct kernel_nexthop old_nexthops[MAX_ECMP_NEXTHOPS];
+    int old_tables[MAX_TABLES_PER_FILTER];
+    int old_table_count = 0;
+    int old_nexthop_count = 0;
+    int set_changed = 0;
+    int group_size = 0;
+
+    slot = find_route_slot_for_route(route);
+    if(slot < 0)
+        return;
+
+    head = find_group_head_for_route(slot, route, NULL, NULL);
+    if(head == NULL)
+        return;
+
+    /* Count group members for debug */
+    r = head;
+    while(r) {
+        group_size++;
+        r = r->multipath;
+    }
+
+    debugf("refresh_installed_ranks(%s): slot=%d, head=%p, group_size=%d\n",
+           format_prefix(route->src->prefix, route->src->plen),
+           slot, (void*)head, group_size);
+
+    /* Record currently installed nexthops before refresh.
+       Use installed_table_count > 0 as the kernel-presence signal rather
+       than installed > 0: the installed flags may have already been zeroed
+       by a prior stale bookkeeping path while the kernel route still lives. */
+    if(multipath_ecmp != ECMP_DISABLED) {
+        r = head;
+        while(r) {
+            const char *ifname = "(null)";
+            int ifindex = -1;
+
+            if(r->neigh && r->neigh->ifp) {
+                ifname = r->neigh->ifp->name;
+                ifindex = r->neigh->ifp->ifindex;
+            }
+
+            debugf("  member %p: installed=%d tables=%d metric=%d via %s if %s\n",
+                   (void*)r, r->installed, r->installed_table_count,
+                   route_metric(r), format_address(r->nexthop), ifname);
+
+            /* Primary: prefer installed==1 candidate, fall back to any
+               member with kernel presence (installed_table_count > 0). */
+            if(r->installed == 1 && old_primary == NULL)
+                old_primary = r;
+            else if(old_primary == NULL && r->installed_table_count > 0)
+                old_primary = r;
+
+            if(old_table_count == 0 && r->installed_table_count > 0) {
+                int copy_count = r->installed_table_count;
+                if(copy_count > MAX_TABLES_PER_FILTER)
+                    copy_count = MAX_TABLES_PER_FILTER;
+                memcpy(old_tables, r->installed_tables, copy_count * sizeof(int));
+                old_table_count = copy_count;
+            }
+
+            /* Collect kernel-present nexthops for change detection */
+            if(r->installed > 0 || r->installed_table_count > 0) {
+                int duplicate = 0;
+                for(int j = 0; j < old_nexthop_count; j++) {
+                    if(old_nexthops[j].ifindex == ifindex &&
+                       memcmp(old_nexthops[j].gate, r->nexthop, 16) == 0) {
+                        duplicate = 1;
+                        break;
+                    }
+                }
+                if(!duplicate && old_nexthop_count < MAX_ECMP_NEXTHOPS) {
+                    memcpy(old_nexthops[old_nexthop_count].gate, r->nexthop, 16);
+                    old_nexthops[old_nexthop_count].ifindex = ifindex;
+                    old_nexthop_count++;
+                }
+            }
+            r = r->multipath;
+        }
+    }
+
+    r = head;
+    while(r) {
+        r->installed = 0;
+        r = r->multipath;
+    }
+
+    if(multipath_ecmp == ECMP_DISABLED) {
+        route->installed = 1;
+        move_installed_route(route, slot);
+        return;
+    }
+
+    count = collect_multipath_nexthops(route, nexthops, MAX_ECMP_NEXTHOPS, NULL);
+    debugf("refresh_installed_ranks: collect_multipath_nexthops returned %d nexthops\n", count);
+    if(count == 0) {
+        if(route_metric(route) < INFINITY) {
+            route->installed = 1;
+            move_installed_route(route, slot);
+        }
+        /* If we had installed nexthops before and now have none, kernel needs update.
+           This includes the case where the route retracted (metric >= INFINITY). */
+        if(old_nexthop_count > 0) {
+            set_changed = 1;
+        }
+        goto update_kernel_if_needed;
+    }
+
+    if(count == 1) {
+        r = head;
+        while(r) {
+                if(r->neigh && r->neigh->ifp &&
+                    !route_expired(r) && route_feasible(r) &&
+               route_metric(r) < INFINITY &&
+               r->neigh->ifp->ifindex == nexthops[0].ifindex &&
+               memcmp(r->nexthop, nexthops[0].gate, 16) == 0) {
+                r->installed = 1;
+                primary = r;
+                break;
+            }
+            r = r->multipath;
+        }
+
+        if(primary == NULL) {
+            route->installed = 1;
+            primary = route;
+        }
+
+        if(primary)
+            move_installed_route(primary, slot);
+
+        if(primary && primary->installed_table_count == 0 && old_table_count > 0) {
+            memcpy(primary->installed_tables, old_tables,
+                   old_table_count * sizeof(int));
+            primary->installed_table_count = old_table_count;
+        }
+        
+        /* Detect transitions that require reprogramming kernel route. */
+        if(old_nexthop_count != 1) {
+            /* Count changed: 0->1, 2+->1, etc. */
+            set_changed = 1;
+        } else if(primary && old_nexthop_count == 1) {
+            /* Count stayed 1 — but the actual nexthop may have changed
+               (e.g. A retracted, B remains: old gate=A, new gate=B). */
+            if(primary->neigh && primary->neigh->ifp) {
+                unsigned int new_ifindex = primary->neigh->ifp->ifindex;
+                if(old_nexthops[0].ifindex != new_ifindex ||
+                   memcmp(old_nexthops[0].gate, primary->nexthop, 16) != 0) {
+                    debugf("  set_changed: single nexthop address changed\n");
+                    set_changed = 1;
+                }
+            }
+            if(!set_changed && old_primary &&
+               old_primary->installed_table_count == 0) {
+                /* Bookkeeping was lost: force a one-time resync */
+                debugf("  set_changed: forcing resync (table state lost)\n");
+                set_changed = 1;
+            }
+        }
+        goto update_kernel_if_needed;
+    }
+
+    for(i = 0; i < count; i++) {
+        r = head;
+        while(r) {
+            if(r->installed == 0 && r->neigh && r->neigh->ifp &&
+               !route_expired(r) && route_feasible(r) &&
+               route_metric(r) < INFINITY &&
+               r->neigh->ifp->ifindex == nexthops[i].ifindex &&
+               memcmp(r->nexthop, nexthops[i].gate, 16) == 0) {
+                r->installed = i + 1;
+                if(r->installed == 1)
+                    primary = r;
+                break;
+            }
+            r = r->multipath;
+        }
+    }
+
+    if(primary)
+        move_installed_route(primary, slot);
+
+    if(primary && primary->installed_table_count == 0 && old_table_count > 0) {
+        memcpy(primary->installed_tables, old_tables, old_table_count * sizeof(int));
+        primary->installed_table_count = old_table_count;
+    }
+
+    if(old_table_count > 0) {
+        r = head;
+        while(r) {
+            if(r != primary && r->installed > 1 && r->installed_table_count == 0) {
+                memcpy(r->installed_tables, old_tables, old_table_count * sizeof(int));
+                r->installed_table_count = old_table_count;
+            }
+            r = r->multipath;
+        }
+    }
+
+    /* If the group now has 2+ nexthops, taint every member so that when it
+       later shrinks back to 1 it stays in multipath encoding. */
+    if(count > 1) {
+        r = head;
+        while(r) {
+            r->multipath_ever = 1;
+            r = r->multipath;
+        }
+    }
+
+    /* Detect if transitioning from single path or different multipath set */
+    if(old_nexthop_count != count) {
+        debugf("  set_changed: old_nexthop_count (%d) != count (%d)\n",
+               old_nexthop_count, count);
+        set_changed = 1;
+    } else if(old_nexthop_count > 1) {
+        /* Check if the multipath members changed */
+        for(i = 0; i < count; i++) {
+            int found = 0;
+            for(int j = 0; j < old_nexthop_count; j++) {
+                if(nexthops[i].ifindex == old_nexthops[j].ifindex &&
+                   memcmp(nexthops[i].gate, old_nexthops[j].gate, 16) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            if(!found) {
+                debugf("  set_changed: nexthop %s not found in old set\n",
+                       format_address(nexthops[i].gate));
+                set_changed = 1;
+                break;
+            }
+        }
+    }
+
+update_kernel_if_needed:
+    if(!set_changed && primary && route_metric(primary) < INFINITY &&
+       primary->installed_table_count == 0) {
+        if(old_table_count > 0) {
+            memcpy(primary->installed_tables, old_tables,
+                   old_table_count * sizeof(int));
+            primary->installed_table_count = old_table_count;
+        } else {
+            debugf("  set_changed: forcing resync (installed primary has no tables)\n");
+            set_changed = 1;
+        }
+    }
+
+    if(!set_changed && force_reprogram && old_nexthop_count > 0) {
+        debugf("  set_changed: forced ECMP reprogram\n");
+        set_changed = 1;
+    }
+
+    /* If ECMP set changed, reprogram kernel route regardless of metric delta. */
+    debugf("refresh_installed_ranks: old_nexthop_count=%d, count=%d, set_changed=%d, primary=%p, old_primary=%p\n",
+           old_nexthop_count, count, set_changed, (void*)primary, (void*)old_primary);
+    if(old_primary)
+        debugf("  old_primary installed_table_count=%d\n", old_primary->installed_table_count);
+    if(set_changed) {
+        int rc;
+
+        debugf("ECMP set changed for %s/%u: reprogramming kernel\n",
+               format_prefix(route->src->prefix, route->src->plen),
+               route->src->plen);
+
+        /* First FLUSH the old route if one was installed */
+        if(old_primary) {
+            rc = change_route(ROUTE_FLUSH,
+                              old_primary,
+                              metric_to_kernel(route_metric(old_primary)),
+                              NULL, 0, 0,
+                              NULL, NULL, NULL);
+            if(rc < 0 && errno != ESRCH && errno != ENOENT)
+                perror("kernel_route(FLUSH ecmp refresh)");
+
+            /* Clear table bookkeeping for every member — they all shared
+               the same kernel entry so they are all gone now. */
+            r = head;
+            while(r) {
+                r->installed_table_count = 0;
+                r = r->multipath;
+            }
+        }
+
+        /* Then ADD the new route if we have a valid primary */
+        if(primary && route_metric(primary) < INFINITY) {
+            int metric = metric_to_kernel(route_metric(primary));
+            rc = change_route(ROUTE_ADD,
+                              primary,
+                              metric,
+                              NULL, 0, 0,
+                              NULL,
+                              primary->installed_tables,
+                              &primary->installed_table_count);
+            if(rc < 0 && errno != EEXIST)
+                perror("kernel_route(ADD ecmp refresh)");
+
+            /* Propagate the installed table list to all secondary ECMP members.
+               They all share the same kernel multipath entry so they must
+               report the same tables — this is also what lets Bug-1 detection
+               work correctly on the next refresh cycle. */
+            if(primary->installed_table_count > 0) {
+                r = head;
+                while(r) {
+                    if(r != primary && r->installed > 1) {
+                        memcpy(r->installed_tables, primary->installed_tables,
+                               primary->installed_table_count * sizeof(int));
+                        r->installed_table_count = primary->installed_table_count;
+                    }
+                    r = r->multipath;
+                }
+            }
+        }
+    }
+
+    /* Debug: show final state */
+    r = head;
+    while(r) {
+        debugf("  final: %p installed=%d tables=%d via %s\n",
+               (void*)r, r->installed, r->installed_table_count,
+               format_address(r->nexthop));
+        r = r->multipath;
+    }
+}
+
+void
+refresh_installed_ranks(struct babel_route *route)
+{
+    refresh_installed_ranks_ext(route, 0);
+}
+
+
+int
+route_ecmp_weight(struct babel_route *route)
+{
+    int slot;
+    int min_metric = INFINITY;
+    int metric;
+    struct babel_route *head;
+    struct babel_route *r;
+
+    if(route == NULL)
+        return 0;
+
+    metric = route_metric(route);
+    if(metric >= INFINITY)
+        return 0;
+
+    slot = find_route_slot_for_route(route);
+    if(slot < 0)
+        return 0;
+
+    head = find_group_head_for_route(slot, route, NULL, NULL);
+    if(head == NULL)
+        return 0;
+
+    r = head;
+    while(r) {
+        int m;
+
+        if(route_expired(r) || !route_feasible(r)) {
+            r = r->multipath;
+            continue;
+        }
+
+        m = route_metric(r);
+        if(m < INFINITY && m < min_metric)
+            min_metric = m;
+
+        r = r->multipath;
+    }
+
+    if(min_metric >= INFINITY)
+        return 0;
+
+    return metric_to_ecmp_weight(metric, min_metric);
+}
+
+int
 change_route(int operation, const struct babel_route *route, int metric,
              const unsigned char *new_next_hop,
-             int new_ifindex, int new_metric,
+             int new_ifindex, int newmetric,
              const struct source *newsrc,
              int *installed_tables, int *installed_table_count)
 {
     struct filter_result filter_result, new_filter_result;
     unsigned char *pref_src = NULL;
     unsigned char *newpref_src = NULL;
-    unsigned int ifindex = route->neigh->ifp->ifindex;
+    unsigned int ifindex = route_ifindex_or_zero(route);
     int m, i, rc, first_rc = 0;
     int tables_to_use[MAX_TABLES_PER_FILTER];
     int num_tables = 0;
@@ -531,6 +1567,14 @@ change_route(int operation, const struct babel_route *route, int metric,
             memcpy(tables_to_use, route->installed_tables, 
                    route->installed_table_count * sizeof(int));
             num_tables = route->installed_table_count;
+        } else if(filter_result.table_count > 0) {
+            /* Bookkeeping fallback: flush from filtered export tables. */
+            memcpy(tables_to_use, filter_result.tables,
+                   filter_result.table_count * sizeof(unsigned int));
+            num_tables = filter_result.table_count;
+        } else if(export_table > 0) {
+            tables_to_use[0] = export_table;
+            num_tables = 1;
         }
     } else {
         /* For ADD/MODIFY, evaluate filter result */
@@ -560,6 +1604,11 @@ change_route(int operation, const struct babel_route *route, int metric,
     for(i = 0; i < num_tables; i++) {
         int table = tables_to_use[i];
         int newtable = table;
+        int use_multipath = 0;
+        struct kernel_nexthop nexthops[MAX_ECMP_NEXTHOPS];
+        int nexthop_count = 0;
+        int best_metric = INFINITY;
+        int effective_newmetric = newmetric;
         
         if(newsrc && new_filter_result.table_count > 0) {
             /* Use corresponding table from new filter result if available */
@@ -569,13 +1618,108 @@ change_route(int operation, const struct babel_route *route, int metric,
             newtable = table;
         }
 
+        if(operation == ROUTE_FLUSH) {
+            int rc_multi, rc_single;
+            int errno_multi = 0, errno_single = 0;
+
+            /* Generic delete pass: try both multipath-style and single-hop
+               deletes so we remove whichever encoding the kernel currently has. */
+            kernel_route_operation_depth++;
+
+            rc_multi = kernel_route_multipath(ROUTE_FLUSH,
+                                              table,
+                                              route->src->prefix, route->src->plen,
+                                              route->src->src_prefix, route->src->src_plen,
+                                              pref_src,
+                                              metric,
+                                              metric,
+                                              NULL,
+                                              0,
+                                              0,
+                                              NULL);
+            if(rc_multi < 0)
+                errno_multi = errno;
+
+            rc_single = kernel_route(ROUTE_FLUSH, table,
+                                     route->src->prefix, route->src->plen,
+                                     route->src->src_prefix, route->src->src_plen, pref_src,
+                                     route->nexthop, ifindex,
+                                     metric, NULL, 0, 0,
+                                     0, NULL);
+            if(rc_single < 0)
+                errno_single = errno;
+
+            kernel_route_operation_depth--;
+
+            if(rc_multi >= 0 || rc_single >= 0) {
+                rc = 0;
+            } else if((errno_multi == ESRCH || errno_multi == ENOENT || errno_multi == ENOSYS) &&
+                      (errno_single == ESRCH || errno_single == ENOENT)) {
+                /* Route not present in either encoding: treat as successful flush. */
+                rc = 0;
+            } else {
+                rc = -1;
+                errno = (errno_multi != 0 && errno_multi != ENOSYS) ?
+                        errno_multi : errno_single;
+            }
+
+            if(rc < 0) {
+                if(first_rc == 0)
+                    first_rc = rc;
+            }
+            continue;
+        }
+
+        if(multipath_ecmp != ECMP_DISABLED) {
+            nexthop_count = collect_multipath_nexthops(route,
+                                                       nexthops,
+                                                       MAX_ECMP_NEXTHOPS,
+                                                       &best_metric);
+            /* Use multipath encoding if: more than 1 nexthop now, OR the
+               group was ever multipath (tainted) and still has >=1 nexthop.
+               Simple routes that never had >1 nexthop keep normal encoding. */
+            if(nexthop_count > 1 || (nexthop_count == 1 && route->multipath_ever))
+                use_multipath = 1;
+
+            /* When one route retracts (newmetric = INFINITY) but valid
+               nexthops remain, use the best valid metric instead.
+               This prevents installing an unreachable route when we still
+               have reachable nexthops. */
+            if(newmetric >= KERNEL_INFINITY && nexthop_count > 0 &&
+               best_metric < INFINITY) {
+                effective_newmetric = metric_to_kernel(best_metric);
+            }
+        }
+        
         kernel_route_operation_depth++;
-        rc = kernel_route(operation, table, route->src->prefix, route->src->plen,
-                            route->src->src_prefix, route->src->src_plen, pref_src,
-                            route->nexthop, ifindex,
-                            metric, new_next_hop, new_ifindex, new_metric,
-                            operation == ROUTE_MODIFY ? newtable : 0,
-                            newpref_src);
+        if(use_multipath) {
+            rc = kernel_route_multipath(operation,
+                                        table,
+                                        route->src->prefix, route->src->plen,
+                                        route->src->src_prefix, route->src->src_plen,
+                                        pref_src,
+                                        metric,
+                                        effective_newmetric,
+                                        nexthops,
+                                        nexthop_count,
+                                        operation == ROUTE_MODIFY ? newtable : 0,
+                                        newpref_src);
+            if(rc < 0 && errno == ENOSYS) {
+                rc = kernel_route(operation, table, route->src->prefix, route->src->plen,
+                                  route->src->src_prefix, route->src->src_plen, pref_src,
+                                  route->nexthop, ifindex,
+                                  metric, new_next_hop, new_ifindex, effective_newmetric,
+                                  operation == ROUTE_MODIFY ? newtable : 0,
+                                  newpref_src);
+            }
+        } else {
+            rc = kernel_route(operation, table, route->src->prefix, route->src->plen,
+                              route->src->src_prefix, route->src->src_plen, pref_src,
+                              route->nexthop, ifindex,
+                              metric, new_next_hop, new_ifindex, effective_newmetric,
+                              operation == ROUTE_MODIFY ? newtable : 0,
+                              newpref_src);
+        }
 
         kernel_route_operation_depth--;
 
@@ -599,7 +1743,7 @@ install_route(struct babel_route *route)
 {
     int i, rc;
 
-    if(route->installed)
+    if(route->installed > 0)
         return;
 
     if(!route_feasible(route))
@@ -627,8 +1771,7 @@ install_route(struct babel_route *route)
         return;
     }
 
-    route->installed = 1;
-    move_installed_route(route, i);
+    refresh_installed_ranks(route);
 
     local_notify_route(route, LOCAL_CHANGE);
 }
@@ -638,22 +1781,21 @@ uninstall_route(struct babel_route *route)
 {
     int rc;
 
-    if(!route->installed)
+    if(route->installed != 1)
         return;
-
-    route->installed = 0;
 
     debugf("uninstall_route(%s from %s)\n",
            format_prefix(route->src->prefix, route->src->plen),
            format_prefix(route->src->src_prefix, route->src->src_plen));
     rc = change_route(ROUTE_FLUSH, route, metric_to_kernel(route_metric(route)),
                       NULL, 0, 0, NULL, NULL, NULL);
-    if(rc < 0) {
+    if(rc < 0)
         perror("kernel_route(FLUSH)");
-        return;
-    }
 
-    route->installed_table_count = 0;
+    /* Always clear installed ranks, even if kernel FLUSH failed.
+       This prevents flush_route() from trying to reprogram ECMP routes
+       that we're abandoning (e.g. during shutdown with EINTR). */
+    clear_installed_ranks(route, 1);
     local_notify_route(route, LOCAL_CHANGE);
 }
 
@@ -664,24 +1806,27 @@ static void
 switch_routes(struct babel_route *old, struct babel_route *new)
 {
     int rc;
+    unsigned int new_ifindex;
 
     if(!old) {
         install_route(new);
         return;
     }
 
-    if(!old->installed)
+    if(old->installed != 1)
         return;
 
     if(!route_feasible(new))
         fprintf(stderr, "WARNING: switching to unfeasible route "
                 "(this shouldn't happen).");
 
+    new_ifindex = route_ifindex_or_zero(new);
+
     debugf("switch_routes(%s from %s)\n",
            format_prefix(old->src->prefix, old->src->plen),
            format_prefix(old->src->src_prefix, old->src->src_plen));
     rc = change_route(ROUTE_MODIFY, old, metric_to_kernel(route_metric(old)),
-                      new->nexthop, new->neigh->ifp->ifindex,
+                 new->nexthop, new_ifindex,
                       metric_to_kernel(route_metric(new)),
                       new->src, new->installed_tables, &new->installed_table_count);
     if(rc < 0) {
@@ -689,14 +1834,8 @@ switch_routes(struct babel_route *old, struct babel_route *new)
         return;
     }
 
-    old->installed = 0;
     old->installed_table_count = 0;
-    new->installed = 1;
-    move_installed_route(new, find_route_slot(new->src->id,
-                                              new->src->prefix, new->src->plen,
-                                              new->src->src_prefix,
-                                              new->src->src_plen,
-                                              NULL));
+    refresh_installed_ranks(new);
     local_notify_route(old, LOCAL_CHANGE);
     local_notify_route(new, LOCAL_CHANGE);
 }
@@ -705,23 +1844,99 @@ void
 change_route_metric(struct babel_route *route,
                     unsigned refmetric, unsigned cost, unsigned add)
 {
-    int old_metric = metric_to_kernel(route_metric(route)),
-        new_metric = metric_to_kernel(MIN(refmetric + cost + add, INFINITY));
+    int oldmetric = metric_to_kernel(route_metric(route)),
+        newmetric = metric_to_kernel(MIN(refmetric + cost + add, INFINITY));
+    int should_refresh_ecmp = 0;
+    int suppress_hold_down = 0;
+    int force_reprogram = 0;
+    int expired = route_expired(route);
 
-    if(route->installed && old_metric != new_metric) {
+    if(multipath_ecmp != ECMP_DISABLED)
+        should_refresh_ecmp = (route->installed > 0 || group_has_installed_member(route));
+
+    if(route->installed > 0 && newmetric >= KERNEL_INFINITY) {
+        struct xroute *xroute;
+
+        if(multipath_ecmp != ECMP_DISABLED && route->installed == 1)
+            force_reprogram = 1;
+
+        xroute = find_xroute(route->src->prefix, route->src->plen,
+                             route->src->src_prefix, route->src->src_plen);
+        if(xroute && (allow_duplicates < 0 || xroute->metric >= allow_duplicates)) {
+            suppress_hold_down = 1;
+            debugf("change_route_metric: suppressing unreachable hold-down for %s (local xroute exists)\n",
+                   format_prefix(route->src->prefix, route->src->plen));
+        }
+    }
+
+    if(multipath_ecmp != ECMP_DISABLED && should_refresh_ecmp &&
+       (expired || newmetric >= KERNEL_INFINITY)) {
+        force_reprogram = 1;
+    }
+
+    if(multipath_ecmp != ECMP_DISABLED && should_refresh_ecmp) {
+        /* For ECMP, always refresh when the route is installed, regardless of
+           whether oldmetric == newmetric.  A route may have had its metric
+           computed as KERNEL_INFINITY already (e.g. neighbour cost blew up)
+           while still holding installed > 1 — in that case oldmetric ==
+           newmetric but the kernel nexthop set still needs to be corrected.
+           refresh_installed_ranks() has its own set_changed guard so spurious
+           calls are cheap. */
+        route_smoothed_metric(route);
+
+        route->refmetric = refmetric;
+        route->cost = cost;
+        route->add_metric = add;
+
+        if(smoothing_half_life == 0) {
+            route->smoothed_metric = route_metric(route);
+            route->smoothed_metric_time = now.tv_sec;
+        }
+
+         debugf("change_route_metric(%s from %s, %d -> %d) [ecmp installed=%d group_installed=%d]\n",
+               format_prefix(route->src->prefix, route->src->plen),
+               format_prefix(route->src->src_prefix, route->src->src_plen),
+             oldmetric, newmetric, route->installed, should_refresh_ecmp);
+
+        /* Let refresh_installed_ranks() handle ALL kernel updates for ECMP.
+           It computes the correct nexthop set (excluding retracted routes)
+           and does a single FLUSH+ADD. Doing ROUTE_MODIFY here would cause
+           duplicate/conflicting kernel operations. */
+          refresh_installed_ranks_ext(route, force_reprogram);
+
+        local_notify_route(route, LOCAL_CHANGE);
+        return;
+    }
+
+    if(route->installed > 0 && oldmetric != newmetric) {
         int rc;
+        unsigned int ifindex = route_ifindex_or_zero(route);
+
+        if(suppress_hold_down) {
+            rc = change_route(ROUTE_FLUSH, route, oldmetric,
+                              NULL, 0, 0, NULL, NULL, NULL);
+            if(rc < 0 && errno != ESRCH && errno != ENOENT)
+                perror("kernel_route(FLUSH hold-down suppress)");
+
+            clear_installed_ranks(route, 1);
+            goto update_local_state;
+        }
+
         debugf("change_route_metric(%s from %s, %d -> %d)\n",
                format_prefix(route->src->prefix, route->src->plen),
                format_prefix(route->src->src_prefix, route->src->src_plen),
-               old_metric, new_metric);
-        rc = change_route(ROUTE_MODIFY, route, old_metric, route->nexthop,
-                          route->neigh->ifp->ifindex, new_metric, NULL, NULL, NULL);
+               oldmetric, newmetric);
+           rc = change_route(ROUTE_MODIFY, route, oldmetric, route->nexthop,
+                     ifindex, newmetric, NULL, NULL, NULL);
         if(rc < 0) {
             perror("kernel_route(MODIFY metric)");
             return;
         }
+
+        refresh_installed_ranks(route);
     }
 
+update_local_state:
     /* Update route->smoothed_metric using the old metric. */
     route_smoothed_metric(route);
 
@@ -749,18 +1964,6 @@ int
 route_feasible(struct babel_route *route)
 {
     return update_feasible(route->src, route->seqno, route->refmetric);
-}
-
-static int
-route_old(struct babel_route *route)
-{
-    return route->time < now.tv_sec - route->hold_time * 7 / 8;
-}
-
-static int
-route_expired(struct babel_route *route)
-{
-    return route->time < now.tv_sec - route->hold_time;
 }
 
 int
@@ -849,6 +2052,8 @@ route_acceptable(struct babel_route *route, int feasible,
         return 0;
     if(feasible && !route_feasible(route))
         return 0;
+    if(feasible && route_metric(route) >= INFINITY)
+        return 0;
     if(exclude && route->neigh == exclude)
         return 0;
     return 1;
@@ -865,25 +2070,42 @@ find_best_route(const unsigned char *id,
                 const unsigned char *src_prefix, unsigned char src_plen,
                 int feasible, struct neighbour *exclude)
 {
-    struct babel_route *route, *r;
+    struct babel_route *route, *head, *r;
     int i = find_route_slot(id, prefix, plen, src_prefix, src_plen, NULL);
 
     if(i < 0)
         return NULL;
 
-    route = routes[i];
-    while(route && !route_acceptable(route, feasible, exclude))
-        route = route->next;
+    route = NULL;
+    head = routes[i];
+    while(head && !route) {
+        r = head;
+        while(r) {
+            if(route_acceptable(r, feasible, exclude) &&
+               (!id || memcmp(r->src->id, id, 8) == 0)) {
+                route = r;
+                break;
+            }
+            r = r->multipath;
+        }
+        head = head->next;
+    }
 
     if(!route)
         return NULL;
 
-    r = route->next;
-    while(r) {
-        if(route_acceptable(r, feasible, exclude) &&
-           (route_smoothed_metric(r) < route_smoothed_metric(route)))
-            route = r;
-        r = r->next;
+    head = routes[i];
+    while(head) {
+        r = head;
+        while(r) {
+            if(r != route &&
+               route_acceptable(r, feasible, exclude) &&
+               (!id || memcmp(r->src->id, id, 8) == 0) &&
+               (route_smoothed_metric(r) < route_smoothed_metric(route)))
+                route = r;
+            r = r->multipath;
+        }
+        head = head->next;
     }
 
     return route;
@@ -904,6 +2126,9 @@ update_route_metric(struct babel_route *route)
         }
     } else {
         struct neighbour *neigh = route->neigh;
+        if(neigh == NULL || neigh->ifp == NULL)
+            return;
+
         int add_metric = input_filter(route->src->id,
                                       route->src->prefix, route->src->plen,
                                       route->src->src_prefix,
@@ -928,11 +2153,15 @@ update_neighbour_metric(struct neighbour *neigh, int changed)
         int i;
 
         for(i = 0; i < route_slots; i++) {
-            struct babel_route *r = routes[i];
-            while(r) {
-                if(r->neigh == neigh)
-                    update_route_metric(r);
-                r = r->next;
+            struct babel_route *head = routes[i];
+            while(head) {
+                struct babel_route *r = head;
+                while(r) {
+                    if(r->neigh == neigh)
+                        update_route_metric(r);
+                    r = r->multipath;
+                }
+                head = head->next;
             }
         }
     }
@@ -946,11 +2175,15 @@ update_interface_metric(struct interface *ifp)
     int i;
 
     for(i = 0; i < route_slots; i++) {
-        struct babel_route *r = routes[i];
-        while(r) {
-            if(r->neigh->ifp == ifp)
-                update_route_metric(r);
-            r = r->next;
+        struct babel_route *head = routes[i];
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(r->neigh && r->neigh->ifp && r->neigh->ifp == ifp)
+                    update_route_metric(r);
+                r = r->multipath;
+            }
+            head = head->next;
         }
     }
 }
@@ -995,6 +2228,9 @@ update_route(const unsigned char *id,
     if(is_v4 != v4mapped(src_prefix))
         return NULL;
 
+    if(neigh == NULL || neigh->ifp == NULL)
+        return NULL;
+
     add_metric = input_filter(id, prefix, plen, src_prefix, src_plen,
                               neigh->address, neigh->ifp->ifindex);
     if(add_metric >= INFINITY)
@@ -1029,22 +2265,24 @@ update_route(const unsigned char *id,
 
     if(route) {
         struct source *oldsrc;
-        unsigned short oldmetric, oldinstalled;
+        unsigned short oldmetric;
+        int oldinstalled_primary;
         int lost = 0;
 
-        oldinstalled = route->installed;
+        oldinstalled_primary = (route->installed == 1);
         oldsrc = route->src;
         oldmetric = route_metric(route);
 
-          if(refmetric >= INFINITY && hard_retract &&
-              oldinstalled && src == route->src) {
+        if( refmetric >= INFINITY && hard_retract &&
+            oldinstalled_primary && src == route->src) {
+
             route->seqno = seqno;
             route->hold_time = hold_time;
 
             change_route_metric(route,
                                 refmetric, neighbour_cost(neigh), add_metric);
 
-            if(route->installed)
+            if(route->installed == 1)
                 uninstall_route(route);
 
             route_lost_ext(oldsrc, oldmetric, 1);
@@ -1055,7 +2293,7 @@ update_route(const unsigned char *id,
            if it makes a route unfeasible in order to break any routing loops
            in a timely manner.  If the source remains the same, we ignore
            the update. */
-        if(!feasible && route->installed) {
+        if(!feasible && route->installed == 1) {
             debugf("Unfeasible update for installed route to %s "
                    "(%s %d %d -> %s %d %d).\n",
                    format_prefix(src->prefix, src->plen),
@@ -1079,8 +2317,8 @@ update_route(const unsigned char *id,
 
         route_changed(route, oldsrc, oldmetric);
         if(!lost) {
-            lost = oldinstalled &&
-                find_installed_route(oldsrc->id, prefix, plen, src_prefix, src_plen, NULL) == NULL;
+            lost = oldinstalled_primary &&
+                find_installed_route(NULL, prefix, plen, src_prefix, src_plen, NULL) == NULL;
         }
         if(lost)
             route_lost_ext(oldsrc, oldmetric, 0);
@@ -1121,6 +2359,7 @@ update_route(const unsigned char *id,
         route->smoothed_metric = MAX(route_metric(route), INFINITY / 2);
         route->smoothed_metric_time = now.tv_sec;
         route->next = NULL;
+        route->multipath = NULL;
         new_route = insert_route(route);
         if(new_route == NULL) {
             fprintf(stderr, "Couldn't insert route.\n");
@@ -1140,10 +2379,10 @@ send_unfeasible_request(struct neighbour *neigh, int force,
                         unsigned short seqno, unsigned short metric,
                         struct source *src)
 {
-    struct babel_route *route = find_installed_route(src->id,
-                                                     src->prefix, src->plen,
-                                                     src->src_prefix, src->src_plen,
-                                                     NULL);
+    struct babel_route *route = find_best_route(src->id,
+                                                src->prefix, src->plen,
+                                                src->src_prefix, src->src_plen,
+                                                0, NULL);
 
     if(seqno_minus(src->seqno, seqno) > 100) {
         /* Probably a source that lost its seqno.  Let it time-out. */
@@ -1171,7 +2410,7 @@ consider_route(struct babel_route *route)
     struct babel_route *installed;
     struct xroute *xroute;
 
-    if(route->installed)
+    if(route->installed == 1)
         return;
 
     if(!route_feasible(route))
@@ -1182,7 +2421,7 @@ consider_route(struct babel_route *route)
     if(xroute && (allow_duplicates < 0 || xroute->metric >= allow_duplicates))
         return;
 
-    installed = find_installed_route(route->src->id,
+    installed = find_installed_route(NULL,
                                      route->src->prefix, route->src->plen,
                                      route->src->src_prefix, route->src->src_plen,
                                      NULL);
@@ -1200,11 +2439,32 @@ consider_route(struct babel_route *route)
        route_smoothed_metric(installed) > route_smoothed_metric(route))
         goto install;
 
+    if(multipath_ecmp != ECMP_DISABLED &&
+       route_metric(installed) < INFINITY &&
+       route_metric(route) < INFINITY) {
+          int slot = find_route_slot_for_route(installed);
+
+                rehome_route_to_installed_group(slot, installed, route);
+
+        /* A new route appeared that could join the ECMP group.
+           Let refresh_installed_ranks() handle the kernel update.
+           It will detect the new nexthop and do a single FLUSH+ADD. */
+        debugf("consider_route: ECMP refresh for %s via %s (installed via %s)\n",
+               format_prefix(route->src->prefix, route->src->plen),
+               format_address(route->nexthop),
+               format_address(installed->nexthop));
+        refresh_installed_ranks(installed);
+    }
+
     return;
 
  install:
+    debugf("consider_route: INSTALLING %s via %s (was installed=%p)\n",
+           format_prefix(route->src->prefix, route->src->plen),
+           format_address(route->nexthop),
+           (void*)installed);
     switch_routes(installed, route);
-    if(installed && route->installed)
+    if(installed && route->installed == 1)
         send_triggered_update(route, installed->src, route_metric(installed));
     else
         send_update(NULL, 1, route->src->prefix, route->src->plen,
@@ -1218,17 +2478,21 @@ retract_neighbour_routes(struct neighbour *neigh)
     int i;
 
     for(i = 0; i < route_slots; i++) {
-        struct babel_route *r = routes[i];
-        while(r) {
-            if(r->neigh == neigh) {
-                if(r->refmetric != INFINITY) {
-                    unsigned short oldmetric = route_metric(r);
-                    retract_route(r);
-                    if(oldmetric != INFINITY)
-                        route_changed(r, r->src, oldmetric);
+        struct babel_route *head = routes[i];
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(r->neigh == neigh) {
+                    if(r->refmetric != INFINITY) {
+                        unsigned short oldmetric = route_metric(r);
+                        retract_route(r);
+                        if(oldmetric != INFINITY)
+                            route_changed(r, r->src, oldmetric);
+                    }
                 }
+                r = r->multipath;
             }
-            r = r->next;
+            head = head->next;
         }
     }
 }
@@ -1241,7 +2505,7 @@ send_triggered_update(struct babel_route *route, struct source *oldsrc,
     /* 1 means send speedily, 2 means resend */
     int urgent;
 
-    if(!route->installed)
+    if(route->installed != 1)
         return;
 
     newmetric = route_metric(route);
@@ -1294,11 +2558,11 @@ void
 route_changed(struct babel_route *route,
               struct source *oldsrc, unsigned short oldmetric)
 {
-    if(route->installed) {
+    if(route->installed == 1) {
         struct babel_route *better_route;
         /* Do this unconditionally -- microoptimisation is not worth it. */
         better_route =
-            find_best_route(route->src->id,
+            find_best_route(NULL,
                             route->src->prefix, route->src->plen,
                             route->src->src_prefix, route->src->src_plen,
                             1, NULL);
@@ -1306,7 +2570,7 @@ route_changed(struct babel_route *route,
             consider_route(better_route);
     }
 
-    if(route->installed) {
+    if(route->installed == 1) {
         /* We didn't change routes after all. */
         send_triggered_update(route, oldsrc, oldmetric);
     } else {
@@ -1321,15 +2585,52 @@ void
 route_lost_ext(struct source *src, unsigned oldmetric, int hard_retract)
 {
     struct babel_route *new_route;
+    struct babel_route *installed;
 
     hard_retract = hard_retract && enable_hard_withdraw;
 
-    new_route = find_best_route(src->id,
-                                src->prefix, src->plen,
-                                src->src_prefix, src->src_plen, 1, NULL);
-    if(new_route && route_feasible(new_route) &&
-       (!hard_retract || route_metric(new_route) < INFINITY)) {
-        consider_route(new_route);
+    if(hard_retract) {
+        int i;
+        struct babel_route *r;
+
+        new_route = NULL;
+        i = find_route_slot(NULL,
+                            src->prefix, src->plen,
+                            src->src_prefix, src->src_plen,
+                            NULL);
+        if(i >= 0) {
+            struct babel_route *head = routes[i];
+            while(head) {
+                r = head;
+                while(r) {
+                    if(!route_expired(r) && route_feasible(r) &&
+                       route_metric(r) < INFINITY &&
+                       (!new_route || route_metric(r) < route_metric(new_route)))
+                        new_route = r;
+                    r = r->multipath;
+                }
+                head = head->next;
+            }
+        }
+    } else {
+        new_route = find_best_route(NULL,
+                                    src->prefix, src->plen,
+                                    src->src_prefix, src->src_plen,
+                                    1,
+                                    NULL);
+    }
+    if(new_route &&
+       ((hard_retract && route_metric(new_route) < INFINITY) ||
+        (!hard_retract && route_feasible(new_route)))) {
+        if(hard_retract) {
+            installed = find_installed_route(NULL,
+                                             src->prefix, src->plen,
+                                             src->src_prefix, src->src_plen,
+                                             NULL);
+            switch_routes(installed, new_route);
+        } else {
+            consider_route(new_route);
+        }
     } else if(oldmetric < INFINITY) {
         /* Avoid creating a blackhole. */
         if(hard_retract) {
@@ -1372,24 +2673,26 @@ expire_routes(void)
 
     i = 0;
     while(i < route_slots) {
-        r = routes[i];
-        while(r) {
-            /* Protect against clock being stepped. */
-            if(r->time > now.tv_sec || route_old(r)) {
-                flush_route(r);
-                goto again;
-            }
+        struct babel_route *head = routes[i];
+        while(head) {
+            r = head;
+            while(r) {
+                if(r->time > now.tv_sec || route_expired(r)) {
+                    flush_route(r);
+                    goto again;
+                }
 
-            update_route_metric(r);
+                update_route_metric(r);
 
-            if(r->installed && r->refmetric < INFINITY) {
-                if(route_old(r))
-                    /* Route about to expire, send a request. */
-                    send_unicast_request(r->neigh,
-                                         r->src->prefix, r->src->plen,
-                                         r->src->src_prefix, r->src->src_plen);
+                if(r->installed && r->refmetric < INFINITY) {
+                    if(route_old(r))
+                        send_unicast_request(r->neigh,
+                                             r->src->prefix, r->src->plen,
+                                             r->src->src_prefix, r->src->src_plen);
+                }
+                r = r->multipath;
             }
-            r = r->next;
+            head = head->next;
         }
         i++;
     again:

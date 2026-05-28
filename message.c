@@ -1017,14 +1017,16 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                        format_address(from), ifp->name);
                 /* If a neighbour is requesting a full route dump from us,
                    we might as well send it an IHU. */
-                send_ihu(neigh, NULL);
+                     if(neigh && neigh->ifp)
+                          send_ihu(neigh, NULL);
                 /* Since nodes send wildcard requests on boot, booting
                    a large number of nodes at the same time may cause an
                    update storm.  Ignore a wildcard request that happens
                    shortly after we sent a full update. */
-                if(neigh->ifp->last_update_time <
-                   now.tv_sec - MAX(neigh->ifp->hello_interval / 100, 1)) {
-                    send_update(neigh->ifp, 0, NULL, 0, NULL, 0);
+                     if(neigh && neigh->ifp &&
+                         neigh->ifp->last_update_time <
+                         now.tv_sec - MAX(neigh->ifp->hello_interval / 100, 1)) {
+                          send_update(neigh->ifp, 0, NULL, 0, NULL, 0);
                 }
             } else {
                 debugf("Received request for dst %s%s%s from %s on %s.\n",
@@ -1320,6 +1322,9 @@ send_pc(struct buffered *buf, struct interface *ifp)
 void
 send_ack(struct neighbour *neigh, unsigned short nonce, unsigned short interval)
 {
+    if(neigh == NULL || neigh->ifp == NULL)
+        return;
+
     debugf("Sending ack (%04x) to %s on %s.\n",
            nonce, format_address(neigh->address), neigh->ifp->name);
     start_message(&neigh->buf, neigh->ifp, MESSAGE_ACK, 2);
@@ -1333,6 +1338,9 @@ int
 send_challenge_request(struct neighbour *neigh)
 {
     int rc;
+
+    if(neigh == NULL || neigh->ifp == NULL)
+        return -1;
 
     gettime(&now);
     if(timeval_compare(&now, &neigh->challenge_request_limitation) <= 0)
@@ -1359,6 +1367,9 @@ int
 send_challenge_reply(struct neighbour *neigh, const unsigned char *crypto_nonce,
                      int len)
 {
+    if(neigh == NULL || neigh->ifp == NULL)
+        return -1;
+
     gettime(&now);
     if(timeval_compare(&now, &neigh->challenge_reply_limitation) <= 0)
         return -1;
@@ -1428,6 +1439,9 @@ send_multicast_hello(struct interface *ifp, unsigned interval, int force)
 void
 send_unicast_hello(struct neighbour *neigh, unsigned interval, int force)
 {
+    if(neigh == NULL || neigh->ifp == NULL)
+        return;
+
     if(!if_up(neigh->ifp))
         return;
 
@@ -1675,7 +1689,7 @@ flushupdates(struct interface *ifp)
     unsigned char last_plen = 0xFF;
     unsigned char last_src_plen = 0xFF;
     const unsigned char *last_id = NULL;
-    int i, duplicate_i;
+    int i;
 
     if(ifp == NULL) {
         struct interface *ifp_aux;
@@ -1701,12 +1715,11 @@ flushupdates(struct interface *ifp)
         /* In order to send fewer update messages, we want to send updates
            with the same router-id together, with IPv6 going out before IPv4. */
 
-        duplicate_i = -1;
         for(i = 0; i < n; i++) {
-            route = find_installed_route(b[i].id,
-                                         b[i].prefix, b[i].plen,
-                                         b[i].src_prefix, b[i].src_plen,
-                                         &duplicate_i);
+            route = find_best_route(b[i].id,
+                                    b[i].prefix, b[i].plen,
+                                    b[i].src_prefix, b[i].src_plen,
+                                    0, NULL);
             if(route)
                 memcpy(b[i].id, route->src->id, 8);
             else
@@ -1725,16 +1738,15 @@ flushupdates(struct interface *ifp)
                b[i].src_plen == last_src_plen &&
                memcmp(b[i].prefix, last_prefix, 16) == 0 &&
                memcmp(b[i].src_prefix, last_src_prefix, 16) == 0 &&
-               ( !has_duplicate_default ||
-                 ( !is_default(b[i].prefix, b[i].plen) ||
-                   memcmp(b[i].id, last_id, 8) == 0 ) ) )
+                    memcmp(b[i].id, last_id, 8) == 0)
                 continue;
 
             xroute = find_xroute(b[i].prefix, b[i].plen,
                                  b[i].src_prefix, b[i].src_plen);
-            route = find_installed_route(b[i].id,
-                                         b[i].prefix, b[i].plen,
-                                         b[i].src_prefix, b[i].src_plen, NULL);
+            route = find_best_route(b[i].id,
+                                    b[i].prefix, b[i].plen,
+                                    b[i].src_prefix, b[i].src_plen,
+                                    0, NULL);
 
             if(xroute && (!route || xroute->metric <= kernel_metric)) {
                 really_send_update(ifp, myid,
@@ -1760,6 +1772,7 @@ flushupdates(struct interface *ifp)
                                     seqno, route->src->id, ifp);
 
                 if((ifp->flags & IF_SPLIT_HORIZON) &&
+                   route->neigh && route->neigh->ifp &&
                    route->neigh->ifp == ifp)
                     continue;
 
@@ -1818,6 +1831,8 @@ buffer_update(struct interface *ifp,
               const unsigned char *prefix, unsigned char plen,
               const unsigned char *src_prefix, unsigned char src_plen)
 {
+    struct buffered_update *entry;
+
     if(ifp->num_buffered_updates > 0 &&
        ifp->num_buffered_updates >= ifp->update_bufsize)
         flushupdates(ifp);
@@ -1845,16 +1860,15 @@ buffer_update(struct interface *ifp,
         ifp->num_buffered_updates = 0;
     }
 
-    memcpy(ifp->buffered_updates[ifp->num_buffered_updates].prefix,
-           prefix, 16);
-    ifp->buffered_updates[ifp->num_buffered_updates].plen = plen;
-    memcpy(ifp->buffered_updates[ifp->num_buffered_updates].src_prefix,
-           src_prefix, 16);
-    ifp->buffered_updates[ifp->num_buffered_updates].src_plen = src_plen;
-    if (id) {
-        memcpy(ifp->buffered_updates[ifp->num_buffered_updates].id,
-        id, 8);
-    }
+    entry = &ifp->buffered_updates[ifp->num_buffered_updates];
+
+    memcpy(entry->prefix, prefix, 16);
+    entry->plen = plen;
+    memcpy(entry->src_prefix, src_prefix, 16);
+    entry->src_plen = src_plen;
+    memset(entry->id, 0, 8);
+    if(id)
+        memcpy(entry->id, id, 8);
     ifp->num_buffered_updates++;
 }
 
@@ -1866,29 +1880,44 @@ send_update(struct interface *ifp, int urgent,
             const unsigned char *prefix, unsigned char plen,
             const unsigned char *src_prefix, unsigned char src_plen)
 {
-    int duplicate_i = -1;
     int is_ss = !is_default(src_prefix, src_plen);
 
     if(ifp == NULL) {
         struct interface *ifp_aux;
+        struct route_stream *routes;
         struct babel_route *route;
         FOR_ALL_INTERFACES(ifp_aux)
             send_update(ifp_aux, urgent, prefix, plen, src_prefix, src_plen);
         if(prefix) {
             /* Since flushupdates only deals with non-wildcard interfaces, we
                need to do this now. */
-            do {
-                route = find_installed_route(NULL, prefix, plen, src_prefix, src_plen, &duplicate_i);
-                if(route && route_metric(route) < INFINITY) {
-                    debugf("Satisfy request for dst %s%s%s (%s, %d).\n",
-                           format_prefix(prefix, plen),
-                           is_ss ? " src " : "",
-                           is_ss ? format_prefix(src_prefix, src_plen) : "",
-                           format_eui64(route->src->id), route->src->seqno);
-                    satisfy_request(prefix, plen, src_prefix, src_plen,
-                                    route->src->seqno, route->src->id, NULL);
+            routes = route_stream(0);
+            if(routes) {
+                while(1) {
+                    route = route_stream_next(routes);
+                    if(route == NULL)
+                        break;
+                    if(route->src->plen != plen || route->src->src_plen != src_plen ||
+                       memcmp(route->src->prefix, prefix, 16) != 0 ||
+                       memcmp(route->src->src_prefix, src_prefix, 16) != 0)
+                        continue;
+                    if(find_best_route(route->src->id,
+                                       prefix, plen,
+                                       src_prefix, src_plen,
+                                       0, NULL) != route)
+                        continue;
+                    if(route_metric(route) < INFINITY) {
+                        debugf("Satisfy request for dst %s%s%s (%s, %d).\n",
+                               format_prefix(prefix, plen),
+                               is_ss ? " src " : "",
+                               is_ss ? format_prefix(src_prefix, src_plen) : "",
+                               format_eui64(route->src->id), route->src->seqno);
+                        satisfy_request(prefix, plen, src_prefix, src_plen,
+                                        route->src->seqno, route->src->id, NULL);
+                    }
                 }
-            } while (route && has_duplicate_default && is_default(prefix, plen));
+                route_stream_done(routes);
+            }
         }
         return;
     }
@@ -1897,32 +1926,53 @@ send_update(struct interface *ifp, int urgent,
         return;
 
     if(prefix && src_prefix) {
+        struct route_stream *routes;
+        int matched = 0;
+
         debugf("Sending update to %s for %s from %s.\n",
                ifp->name, format_prefix(prefix, plen),
                format_prefix(src_prefix, src_plen));
-        if (has_duplicate_default && is_default(prefix, plen)) {
-            duplicate_i = -1;
-            struct babel_route *route;
-            do {
-                route = find_installed_route(NULL, prefix, plen, src_prefix, src_plen, &duplicate_i);
-                if(route) {
-                    debugf("Buffer update for dst %s%s%s on %s (%s, %d).\n",
-                           format_prefix(prefix, plen),
-                           is_ss ? " src " : "",
-                           is_ss ? format_prefix(src_prefix, src_plen) : "",
-                           ifp->name,
-                           format_eui64(route->src->id), route->src->seqno);
-                    buffer_update(ifp, route->src->id, prefix, plen, src_prefix, src_plen);
-                }
-            } while (route);
-        } else {
+
+        routes = route_stream(0);
+        if(routes) {
+            while(1) {
+                struct babel_route *route = route_stream_next(routes);
+                if(route == NULL)
+                    break;
+
+                if(route->src->plen != plen || route->src->src_plen != src_plen ||
+                   memcmp(route->src->prefix, prefix, 16) != 0 ||
+                   memcmp(route->src->src_prefix, src_prefix, 16) != 0)
+                    continue;
+
+                if(find_best_route(route->src->id,
+                                   prefix, plen,
+                                   src_prefix, src_plen,
+                                   0, NULL) != route)
+                    continue;
+
+                debugf("Buffer update for dst %s%s%s on %s (%s, %d).\n",
+                       format_prefix(prefix, plen),
+                       is_ss ? " src " : "",
+                       is_ss ? format_prefix(src_prefix, src_plen) : "",
+                       ifp->name,
+                       format_eui64(route->src->id), route->src->seqno);
+                buffer_update(ifp, route->src->id,
+                              route->src->prefix, route->src->plen,
+                              route->src->src_prefix, route->src->src_plen);
+                matched = 1;
+            }
+            route_stream_done(routes);
+        }
+
+        if(!matched) {
             buffer_update(ifp, NULL, prefix, plen, src_prefix, src_plen);
         }
     } else if(prefix || src_prefix) {
         struct route_stream *routes;
         send_self_update(ifp);
         debugf("Sending update to %s for any.\n", ifp->name);
-        routes = route_stream(1);
+        routes = route_stream(0);
         if(routes) {
             while(1) {
                 int is_ss;
@@ -1932,6 +1982,11 @@ send_update(struct interface *ifp, int urgent,
                 is_ss = !is_default(route->src->src_prefix,
                                     route->src->src_plen);
                 if((src_prefix && is_ss) || (prefix && !is_ss))
+                    continue;
+                if(find_best_route(route->src->id,
+                                   route->src->prefix, route->src->plen,
+                                   route->src->src_prefix, route->src->src_plen,
+                                   0, NULL) != route)
                     continue;
                 buffer_update(ifp, route->src->id, route->src->prefix, route->src->plen,
                               route->src->src_prefix, route->src->src_plen);
@@ -2056,7 +2111,7 @@ send_wildcard_retraction(struct interface *ifp)
     }
 }
 
-static void
+void
 update_myseqno()
 {
     myseqno = seqno_plus(myseqno, 1);
@@ -2150,6 +2205,9 @@ send_ihu(struct neighbour *neigh, struct interface *ifp)
         return;
 
     ifp = neigh->ifp;
+    if(ifp == NULL)
+        return;
+
     if(!if_up(ifp))
         return;
 
@@ -2303,6 +2361,9 @@ send_unicast_request(struct neighbour *neigh,
                      const unsigned char *prefix, unsigned char plen,
                      const unsigned char *src_prefix, unsigned char src_plen)
 {
+    if(neigh == NULL || neigh->ifp == NULL)
+        return;
+
     if(!if_up(neigh->ifp))
         return;
 
@@ -2454,7 +2515,7 @@ handle_request(struct neighbour *neigh, const unsigned char *prefix,
     struct neighbour *successor = NULL;
 
     xroute = find_xroute(prefix, plen, src_prefix, src_plen);
-    route = find_installed_route(id, prefix, plen, src_prefix, src_plen, NULL);
+    route = find_best_route(id, prefix, plen, src_prefix, src_plen, 0, NULL);
     if(xroute && (!route || xroute->metric <= kernel_metric)) {
         if(hop_count > 0 && memcmp(id, myid, 8) == 0) {
             if(seqno_compare(seqno, myseqno) > 0) {
@@ -2496,12 +2557,14 @@ handle_request(struct neighbour *neigh, const unsigned char *prefix,
     if(!successor || successor == neigh) {
         /* We were about to forward a request to its requestor.  Try to
         find a different neighbour to forward the request to. */
-        struct babel_route *other_route;
+        if(route) {
+            struct babel_route *other_route;
 
-        other_route = find_best_route(route->src->id, prefix, plen, src_prefix, src_plen,
-                                    0, neigh);
-        if(other_route && route_metric(other_route) < INFINITY)
-            successor = other_route->neigh;
+            other_route = find_best_route(route->src->id, prefix, plen, src_prefix, src_plen,
+                                        0, neigh);
+            if(other_route && route_metric(other_route) < INFINITY)
+                successor = other_route->neigh;
+        }
     }
 
     if(!successor || successor == neigh)

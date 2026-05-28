@@ -205,6 +205,7 @@ local_notify_neighbour_1(struct local_socket *s,
                          struct neighbour *neigh, int kind)
 {
     char buf[512], rttbuf[64];
+    const char *ifname = "(none)";
     int rc;
 
     rttbuf[0] = '\0';
@@ -215,6 +216,9 @@ local_notify_neighbour_1(struct local_socket *s,
             rttbuf[0] = '\0';
     }
 
+    if(neigh->ifp)
+        ifname = neigh->ifp->name;
+
     rc = snprintf(buf, 512,
                   "%s neighbour %lx address %s "
                   "if %s reach %04x ureach %04x "
@@ -224,7 +228,7 @@ local_notify_neighbour_1(struct local_socket *s,
                      address as a unique identifier. */
                   (unsigned long int)neigh,
                   format_address(neigh->address),
-                  neigh->ifp->name,
+                        ifname,
                   neigh->hello.reach,
                   neigh->uhello.reach,
                   neighbour_rxcost(neigh),
@@ -312,8 +316,11 @@ local_notify_xroute(struct xroute *xroute, int kind)
 static void
 local_notify_route_1(struct local_socket *s, struct babel_route *route, int kind)
 {
-    char buf[512], tables_buf[384];
+    char buf[640], tables_buf[384], weight_buf[32];
     int rc, i;
+    int weight;
+    const unsigned char *via = zeroes;
+    const char *ifname = "(none)";
     const char *dst_prefix = format_prefix(route->src->prefix,
                                            route->src->plen);
     const char *src_prefix = format_prefix(route->src->src_prefix,
@@ -332,20 +339,35 @@ local_notify_route_1(struct local_socket *s, struct babel_route *route, int kind
         }
     }
 
-    rc = snprintf(buf, 512,
-                  "%s route %lx prefix %s from %s installed %s tables %s "
-                  "id %s metric %d refmetric %d via %s if %s\n",
+    weight = route_ecmp_weight(route);
+    if(weight > 0)
+        snprintf(weight_buf, sizeof(weight_buf), "%d", weight);
+    else
+        snprintf(weight_buf, sizeof(weight_buf), "-");
+
+    if(route->neigh && route->neigh->ifp) {
+        via = route->neigh->address;
+        ifname = route->neigh->ifp->name;
+    }
+
+    rc = snprintf(buf, sizeof(buf),
+                  "%s route %lx prefix %s from %s installed %s ecmp %s tables %s "
+                  "id %s metric %d refmetric %d age %d installed_rank %d weight %s via %s if %s\n",
                   local_kind(kind),
                   (unsigned long)route,
                   dst_prefix, src_prefix,
                   route->installed ? "yes" : "no",
+                  route_ecmp_mode(multipath_ecmp),
                   tables_buf,
                   format_eui64(route->src->id),
                   route_metric(route), route->refmetric,
-                  format_address(route->neigh->address),
-                  route->neigh->ifp->name);
+                  (int)(now.tv_sec - route->time),
+                  route->installed,
+                  weight_buf,
+                  format_address(via),
+                  ifname);
 
-    if(rc < 0 || rc >= 512)
+    if(rc < 0 || rc >= (int)sizeof(buf))
         goto fail;
 
     rc = write_timeout(s->fd, buf, rc);
@@ -378,8 +400,9 @@ local_notify_status_1(struct local_socket *s, int kind)
     when = time(NULL);
 
     rc = snprintf(buf, sizeof(buf),
-                  "%s daemon version %s my-id %s my-seqno %u at %s\n",
+                  "%s daemon version %s ecmp %s window %d my-id %s my-seqno %u at %s\n",
                   local_kind(kind), BABELD_VERSION,
+                  route_ecmp_mode(multipath_ecmp), ecmp_metric_window,
                   format_eui64(myid), (unsigned int)myseqno,
                   local_dump_timestamp(when, time_buf, sizeof(time_buf)));
     if(rc < 0 || rc >= (int)sizeof(buf))
@@ -440,7 +463,7 @@ local_notify_all_1(struct local_socket *s)
                 break;
             local_count_dump_route(&route_counters,
                                    route->src->prefix, route->src->plen,
-                                   route->installed);
+                                   route->installed == 1);
             local_notify_route_1(s, route, LOCAL_ADD);
         }
         route_stream_done(routes);
@@ -572,8 +595,9 @@ local_header(struct local_socket *s)
         strncpy(host, "alamakota", 64);
 
     rc = snprintf(buf, 512,
-                  "BABEL 1.0\nversion %s\nhost %s\nmy-id %s\nmy-seqno %u\nok\n",
-                  BABELD_VERSION, host, format_eui64(myid),
+                  "BABEL 1.0\nversion %s\necmp %s\necmp-metric-window %d\nhost %s\nmy-id %s\nmy-seqno %u\nok\n",
+                  BABELD_VERSION, route_ecmp_mode(multipath_ecmp),
+                  ecmp_metric_window, host, format_eui64(myid),
                   (unsigned int)myseqno);
     if(rc < 0 || rc >= 512)
         goto fail;
