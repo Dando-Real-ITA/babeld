@@ -1159,6 +1159,8 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
     struct babel_route *old_primary = NULL;
     struct kernel_nexthop nexthops[MAX_ECMP_NEXTHOPS];
     struct kernel_nexthop old_nexthops[MAX_ECMP_NEXTHOPS];
+    int old_tables[MAX_TABLES_PER_FILTER];
+    int old_table_count = 0;
     int old_nexthop_count = 0;
     int set_changed = 0;
     int group_size = 0;
@@ -1207,6 +1209,14 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
                 old_primary = r;
             else if(old_primary == NULL && r->installed_table_count > 0)
                 old_primary = r;
+
+            if(old_table_count == 0 && r->installed_table_count > 0) {
+                int copy_count = r->installed_table_count;
+                if(copy_count > MAX_TABLES_PER_FILTER)
+                    copy_count = MAX_TABLES_PER_FILTER;
+                memcpy(old_tables, r->installed_tables, copy_count * sizeof(int));
+                old_table_count = copy_count;
+            }
 
             /* Collect kernel-present nexthops for change detection */
             if(r->installed > 0 || r->installed_table_count > 0) {
@@ -1322,6 +1332,27 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
 
     if(primary)
         move_installed_route(primary, slot);
+
+    if(primary && primary->installed_table_count == 0 && old_table_count > 0) {
+        memcpy(primary->installed_tables, old_tables, old_table_count * sizeof(int));
+        primary->installed_table_count = old_table_count;
+    }
+
+    if(primary && primary->installed_table_count == 0 && old_table_count > 0) {
+        memcpy(primary->installed_tables, old_tables, old_table_count * sizeof(int));
+        primary->installed_table_count = old_table_count;
+    }
+
+    if(old_table_count > 0) {
+        r = head;
+        while(r) {
+            if(r != primary && r->installed > 1 && r->installed_table_count == 0) {
+                memcpy(r->installed_tables, old_tables, old_table_count * sizeof(int));
+                r->installed_table_count = old_table_count;
+            }
+            r = r->multipath;
+        }
+    }
 
     /* If the group now has 2+ nexthops, taint every member so that when it
        later shrinks back to 1 it stays in multipath encoding. */
