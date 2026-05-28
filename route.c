@@ -484,20 +484,49 @@ flush_route(struct babel_route *route)
     oldmetric = route_metric(route);
     src = route->src;
 
+    debugf("flush_route: %s via %s installed=%d metric=%d\n",
+           format_prefix(route->src->prefix, route->src->plen),
+           format_address(route->nexthop),
+           route->installed, route_metric(route));
+
     i = find_route_slot(route->src->id,
                         route->src->prefix, route->src->plen,
                         route->src->src_prefix, route->src->src_plen, NULL);
     assert(i >= 0 && i < route_slots);
 
+    /* Debug: show all routes in this slot */
+    {
+        struct babel_route *dbg_head = routes[i];
+        int group_num = 0;
+        while(dbg_head) {
+            struct babel_route *dbg_r = dbg_head;
+            int member_num = 0;
+            while(dbg_r) {
+                debugf("  slot[%d] group[%d] member[%d]: installed=%d metric=%d via %s%s\n",
+                       i, group_num, member_num,
+                       dbg_r->installed, route_metric(dbg_r),
+                       format_address(dbg_r->nexthop),
+                       dbg_r == route ? " <-- FLUSHING" : "");
+                dbg_r = dbg_r->multipath;
+                member_num++;
+            }
+            dbg_head = dbg_head->next;
+            group_num++;
+        }
+    }
+
     if(route->installed == 1) {
-        /* Primary route: check if there are other installed ECMP members */
+        /* Primary route: check if there are other installed ECMP members
+           OR other routes in this slot that could potentially be installed */
         struct babel_route *head = routes[i];
         has_alternate = 0;
         while(head) {
             struct babel_route *r = head;
             while(r) {
-                if(r != route && r->installed > 1) {
+                if(r != route && (r->installed > 0 || route_metric(r) < INFINITY)) {
                     has_alternate = 1;
+                    debugf("  found alternate: via %s installed=%d metric=%d\n",
+                           format_address(r->nexthop), r->installed, route_metric(r));
                     break;
                 }
                 r = r->multipath;
@@ -509,13 +538,18 @@ flush_route(struct babel_route *route)
         
         if(has_alternate) {
             update_ecmp = 1;
+            debugf("  -> will update_ecmp\n");
         } else {
+            debugf("  -> no alternate, uninstalling and marking lost\n");
             uninstall_route(route);
             lost = 1;
         }
     } else if(route->installed > 1) {
         /* Secondary ECMP member: primary exists, need to reprogram */
         update_ecmp = 1;
+        debugf("  -> secondary member, will update_ecmp\n");
+    } else {
+        debugf("  -> not installed, nothing to do for kernel\n");
     }
 
     local_notify_route(route, LOCAL_FLUSH);
@@ -1088,8 +1122,9 @@ refresh_installed_ranks(struct babel_route *route)
             route->installed = 1;
             move_installed_route(route, slot);
         }
-        /* If we had installed nexthops before and now have none, kernel needs update */
-        if(old_nexthop_count > 0 && route_metric(route) < INFINITY) {
+        /* If we had installed nexthops before and now have none, kernel needs update.
+           This includes the case where the route retracted (metric >= INFINITY). */
+        if(old_nexthop_count > 0) {
             set_changed = 1;
         }
         goto update_kernel_if_needed;
@@ -1181,14 +1216,14 @@ update_kernel_if_needed:
            old_nexthop_count, count, set_changed, (void*)primary, (void*)old_primary);
     if(old_primary)
         debugf("  old_primary installed_table_count=%d\n", old_primary->installed_table_count);
-    if(set_changed && primary && route_metric(primary) < INFINITY) {
+    if(set_changed) {
         int rc;
-        int metric;
 
         debugf("ECMP set changed for %s/%u: reprogramming kernel\n",
                format_prefix(route->src->prefix, route->src->plen),
                route->src->plen);
 
+        /* First FLUSH the old route if one was installed */
         if(old_primary && old_primary->installed_table_count > 0) {
             rc = change_route(ROUTE_FLUSH,
                               old_primary,
@@ -1201,16 +1236,19 @@ update_kernel_if_needed:
             old_primary->installed_table_count = 0;
         }
 
-        metric = metric_to_kernel(route_metric(primary));
-        rc = change_route(ROUTE_ADD,
-                          primary,
-                          metric,
-                          NULL, 0, 0,
-                          NULL,
-                          primary->installed_tables,
-                          &primary->installed_table_count);
-        if(rc < 0 && errno != EEXIST)
-            perror("kernel_route(ADD ecmp refresh)");
+        /* Then ADD the new route if we have a valid primary */
+        if(primary && route_metric(primary) < INFINITY) {
+            int metric = metric_to_kernel(route_metric(primary));
+            rc = change_route(ROUTE_ADD,
+                              primary,
+                              metric,
+                              NULL, 0, 0,
+                              NULL,
+                              primary->installed_tables,
+                              &primary->installed_table_count);
+            if(rc < 0 && errno != EEXIST)
+                perror("kernel_route(ADD ecmp refresh)");
+        }
     }
 
     /* Debug: show final state */
