@@ -53,6 +53,9 @@ int smoothing_half_life = 0;
 int two_to_the_one_over_hl = 0; /* 2^(1/hl) * 0x10000 */
 static int kernel_route_operation_depth = 0;
 
+static void refresh_installed_ranks_ext(struct babel_route *route,
+                                        int force_reprogram);
+
 int
 kernel_route_operation_in_progress(void)
 {
@@ -692,8 +695,11 @@ flush_route(struct babel_route *route)
         debugf("  -> calling refresh_installed_ranks on routes[%d]\n", i);
         /* An ECMP member was flushed. Let refresh_installed_ranks() handle
            the kernel update - it will detect the changed nexthop set and
-           do a single FLUSH+ADD. */
-        refresh_installed_ranks(primary);
+           do a single FLUSH+ADD.
+           Force reprogramming here: the removed member is already detached
+           from the in-memory group, so normal set-diff detection may not see
+           the old kernel nexthop set. */
+        refresh_installed_ranks_ext(primary, 1);
     } else {
         debugf("  -> NOT calling refresh_installed_ranks (conditions not met)\n");
     }
