@@ -32,6 +32,7 @@ THE SOFTWARE.
 #include <time.h>
 #include <signal.h>
 #include <assert.h>
+#include <execinfo.h>
 
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -1031,6 +1032,25 @@ sigreopening(int signo)
 }
 
 static void
+sigsegv_handler(int signo, siginfo_t *info, void *ctx)
+{
+    /* Write backtrace using only async-signal-safe calls.
+       backtrace_symbols_fd writes directly to a file descriptor.
+       When daemonised, stderr (fd 2) has already been dup2'd to the
+       logfile by reopen_logfile(), so this goes to the right place. */
+    void *bt[64];
+    int n = backtrace(bt, 64);
+    const char msg[] = "\n*** babeld SIGSEGV - backtrace:\n";
+    if(write(STDERR_FILENO, msg, sizeof(msg) - 1)) {}
+    backtrace_symbols_fd(bt, n, STDERR_FILENO);
+    const char msg2[] = "*** end backtrace\n";
+    if(write(STDERR_FILENO, msg2, sizeof(msg2) - 1)) {}
+    /* Re-raise: SA_RESETHAND restores default SIGSEGV handler so this
+       terminates with a core dump. */
+    raise(SIGSEGV);
+}
+
+static void
 init_signals(void)
 {
     struct sigaction sa;
@@ -1079,6 +1099,12 @@ init_signals(void)
     sa.sa_flags = 0;
     sigaction(SIGINFO, &sa, NULL);
 #endif
+
+    sigemptyset(&ss);
+    sa.sa_sigaction = sigsegv_handler;
+    sa.sa_mask = ss;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigaction(SIGSEGV, &sa, NULL);
 }
 
 static void
