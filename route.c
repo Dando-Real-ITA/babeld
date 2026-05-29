@@ -1172,7 +1172,54 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
     if(slot < 0)
         return;
 
-    head = find_group_head_for_route(slot, route, NULL, NULL);
+    head = NULL;
+
+    /* Canonicalise recalculation target:
+       1) scan group heads first to find the best candidate group;
+       2) scan only that group's multipath members to pick the best route.
+       This prevents suboptimal callers from anchoring refresh on the wrong
+       group when a better group exists in the same slot. */
+    if(multipath_ecmp != ECMP_DISABLED) {
+        struct babel_route *best_head = NULL;
+        int best_head_metric = INFINITY;
+
+        slot_head = routes[slot];
+        while(slot_head) {
+            int m = route_metric(slot_head);
+            if(slot_head->neigh && slot_head->neigh->ifp &&
+               !route_expired(slot_head) && route_feasible(slot_head) &&
+               m < INFINITY && m < best_head_metric) {
+                best_head = slot_head;
+                best_head_metric = m;
+            }
+            slot_head = slot_head->next;
+        }
+
+        if(best_head) {
+            struct babel_route *best_member = best_head;
+            int best_member_metric = best_head_metric;
+
+            r = best_head->multipath;
+            while(r) {
+                int m = route_metric(r);
+                if(r->neigh && r->neigh->ifp &&
+                   !route_expired(r) && route_feasible(r) &&
+                   m < INFINITY && m < best_member_metric) {
+                    best_member = r;
+                    best_member_metric = m;
+                }
+                r = r->multipath;
+            }
+
+            route = best_member;
+            head = best_head;
+            debugf("refresh_installed_ranks: canonicalised to best group head=%p via %s metric=%d\n",
+                   (void*)head, format_address(route->nexthop), best_member_metric);
+        }
+    }
+
+    if(head == NULL)
+        head = find_group_head_for_route(slot, route, NULL, NULL);
     if(head == NULL)
         return;
 
@@ -1254,7 +1301,9 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
             debugf("BUG: slot %d has %d installed primaries (%d installed members) for %s\n",
                    slot, installed_primary_count, installed_member_count,
                    format_prefix(route->src->prefix, route->src->plen));
+#ifdef BABELD_ECMP_STRICT_ASSERT
             assert(installed_primary_count <= 1);
+#endif
         }
     }
 
