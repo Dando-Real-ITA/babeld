@@ -281,10 +281,10 @@ enables weighted ECMP according to route metrics.  The default is
 .TP
 .BI ecmp-metric-window " metric-units"
 Maximum metric distance from the best candidate that is considered part
-of an ECMP nexthop group.  A value of 200 groups routes within roughly
+of an ECMP nexthop group.  A value of 300 groups routes within roughly
 two wired hops of the best candidate.  A value of 0 restricts grouping
 to exact metric matches.  The default is
-.BR 200 .
+.BR 300 .
 .TP
 .BI smoothing-half-life " seconds"
 This specifies the half-life in seconds of the exponential decay used
