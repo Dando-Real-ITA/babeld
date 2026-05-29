@@ -1153,6 +1153,7 @@ static void
 refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
 {
     int slot, i, count;
+    struct babel_route *slot_head;
     struct babel_route *head;
     struct babel_route *r;
     struct babel_route *primary = NULL;
@@ -1164,6 +1165,8 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
     int old_nexthop_count = 0;
     int set_changed = 0;
     int group_size = 0;
+    int installed_primary_count = 0;
+    int installed_member_count = 0;
 
     slot = find_route_slot_for_route(route);
     if(slot < 0)
@@ -1189,59 +1192,81 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
        than installed > 0: the installed flags may have already been zeroed
        by a prior stale bookkeeping path while the kernel route still lives. */
     if(multipath_ecmp != ECMP_DISABLED) {
-        r = head;
-        while(r) {
-            const char *ifname = "(null)";
-            int ifindex = -1;
+        slot_head = routes[slot];
+        while(slot_head) {
+            r = slot_head;
+            while(r) {
+                const char *ifname = "(null)";
+                int ifindex = -1;
 
-            if(r->neigh && r->neigh->ifp) {
-                ifname = r->neigh->ifp->name;
-                ifindex = r->neigh->ifp->ifindex;
-            }
+                if(r->neigh && r->neigh->ifp) {
+                    ifname = r->neigh->ifp->name;
+                    ifindex = r->neigh->ifp->ifindex;
+                }
 
-            debugf("  member %p: installed=%d tables=%d metric=%d via %s if %s\n",
-                   (void*)r, r->installed, r->installed_table_count,
-                   route_metric(r), format_address(r->nexthop), ifname);
+                debugf("  member %p: installed=%d tables=%d metric=%d via %s if %s\n",
+                       (void*)r, r->installed, r->installed_table_count,
+                       route_metric(r), format_address(r->nexthop), ifname);
 
-            /* Primary: prefer installed==1 candidate, fall back to any
-               member with kernel presence (installed_table_count > 0). */
-            if(r->installed == 1 && old_primary == NULL)
-                old_primary = r;
-            else if(old_primary == NULL && r->installed_table_count > 0)
-                old_primary = r;
+                if(r->installed > 0)
+                    installed_member_count++;
+                if(r->installed == 1)
+                    installed_primary_count++;
 
-            if(old_table_count == 0 && r->installed_table_count > 0) {
-                int copy_count = r->installed_table_count;
-                if(copy_count > MAX_TABLES_PER_FILTER)
-                    copy_count = MAX_TABLES_PER_FILTER;
-                memcpy(old_tables, r->installed_tables, copy_count * sizeof(int));
-                old_table_count = copy_count;
-            }
+                /* Primary: prefer an explicit installed primary,
+                   fall back to any member with kernel presence. */
+                if(old_primary == NULL && r->installed == 1)
+                    old_primary = r;
+                else if(old_primary == NULL && r->installed_table_count > 0)
+                    old_primary = r;
 
-            /* Collect kernel-present nexthops for change detection */
-            if(r->installed > 0 || r->installed_table_count > 0) {
-                int duplicate = 0;
-                for(int j = 0; j < old_nexthop_count; j++) {
-                    if(old_nexthops[j].ifindex == ifindex &&
-                       memcmp(old_nexthops[j].gate, r->nexthop, 16) == 0) {
-                        duplicate = 1;
-                        break;
+                if(old_table_count == 0 && r->installed_table_count > 0) {
+                    int copy_count = r->installed_table_count;
+                    if(copy_count > MAX_TABLES_PER_FILTER)
+                        copy_count = MAX_TABLES_PER_FILTER;
+                    memcpy(old_tables, r->installed_tables, copy_count * sizeof(int));
+                    old_table_count = copy_count;
+                }
+
+                /* Collect kernel-present nexthops for change detection */
+                if(r->installed > 0 || r->installed_table_count > 0) {
+                    int duplicate = 0;
+                    int j;
+                    for(j = 0; j < old_nexthop_count; j++) {
+                        if(old_nexthops[j].ifindex == ifindex &&
+                           memcmp(old_nexthops[j].gate, r->nexthop, 16) == 0) {
+                            duplicate = 1;
+                            break;
+                        }
+                    }
+                    if(!duplicate && old_nexthop_count < MAX_ECMP_NEXTHOPS) {
+                        memcpy(old_nexthops[old_nexthop_count].gate, r->nexthop, 16);
+                        old_nexthops[old_nexthop_count].ifindex = ifindex;
+                        old_nexthop_count++;
                     }
                 }
-                if(!duplicate && old_nexthop_count < MAX_ECMP_NEXTHOPS) {
-                    memcpy(old_nexthops[old_nexthop_count].gate, r->nexthop, 16);
-                    old_nexthops[old_nexthop_count].ifindex = ifindex;
-                    old_nexthop_count++;
-                }
+                r = r->multipath;
             }
-            r = r->multipath;
+            slot_head = slot_head->next;
+        }
+
+        if(installed_primary_count > 1) {
+            debugf("BUG: slot %d has %d installed primaries (%d installed members) for %s\n",
+                   slot, installed_primary_count, installed_member_count,
+                   format_prefix(route->src->prefix, route->src->plen));
+            assert(installed_primary_count <= 1);
         }
     }
 
-    r = head;
-    while(r) {
-        r->installed = 0;
-        r = r->multipath;
+    /* Installed rank bookkeeping is slot-wide (single kernel route per slot). */
+    slot_head = routes[slot];
+    while(slot_head) {
+        r = slot_head;
+        while(r) {
+            r->installed = 0;
+            r = r->multipath;
+        }
+        slot_head = slot_head->next;
     }
 
     if(multipath_ecmp == ECMP_DISABLED) {
@@ -1391,6 +1416,18 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
     }
 
 update_kernel_if_needed:
+    /* Keep kernel-presence metadata only on currently installed members. */
+    slot_head = routes[slot];
+    while(slot_head) {
+        r = slot_head;
+        while(r) {
+            if(r->installed == 0)
+                r->installed_table_count = 0;
+            r = r->multipath;
+        }
+        slot_head = slot_head->next;
+    }
+
     if(!set_changed && primary && route_metric(primary) < INFINITY &&
        primary->installed_table_count == 0) {
         if(old_table_count > 0) {
