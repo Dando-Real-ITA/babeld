@@ -794,6 +794,9 @@ babel_main(char **interface_names, int num_interface_names)
             delay_init_flow = 0;
         }
 
+        route_flush_coalesced_metric_updates();
+        route_flush_deferred_ecmp_reprograms();
+
         if(now.tv_sec >= expiry_time) {
             expire_routes();
             expire_resend();
