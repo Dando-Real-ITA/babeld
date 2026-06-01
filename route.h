@@ -39,9 +39,11 @@ struct babel_route {
     short installed; /* 0: not installed, 1: primary installed, >1: ECMP nexthop rank */
     unsigned char multipath_ever; /* 1 if this group ever had 2+ nexthops installed */
     unsigned char metric_update_pending; /* deferred kernel metric update pending */
-    time_t metric_update_due;            /* wall-clock second when deferred update is due */
+    struct timeval metric_update_started; /* start of current coalescing window */
+    struct timeval metric_update_due;    /* deferred update deadline */
     unsigned char ecmp_reprogram_pending; /* deferred ECMP reprogram pending */
-    time_t ecmp_reprogram_due;           /* wall-clock second when deferred ECMP reprogram is due */
+    struct timeval ecmp_reprogram_started; /* start of current ECMP coalescing window */
+    struct timeval ecmp_reprogram_due;   /* deferred ECMP reprogram deadline */
     unsigned int nexthop_hash;           /* fingerprint of current nexthop set (for caching) */
     int installed_tables[MAX_TABLES_PER_FILTER];  /* Array of kernel routing tables */
     int installed_table_count;                     /* Number of tables route is installed in */
@@ -63,8 +65,16 @@ struct babel_route {
 #define DEFAULT_ROUTE_METRIC_COALESCE_MSEC 4000
 #endif
 
+#ifndef MAX_ROUTE_METRIC_COALESCE_MSEC
+#define MAX_ROUTE_METRIC_COALESCE_MSEC 300000
+#endif
+
 #ifndef DEFAULT_ECMP_COALESCE_MSEC
 #define DEFAULT_ECMP_COALESCE_MSEC 4000
+#endif
+
+#ifndef MAX_ECMP_COALESCE_MSEC
+#define MAX_ECMP_COALESCE_MSEC 300000
 #endif
 
 /* multipath_ecmp values */
