@@ -170,6 +170,7 @@ route_flush_coalesced_metric_updates(void)
 {
     struct babel_route *pending;
     struct timeval next_due = {0, 0};
+    struct babel_route *metric_requeue_tail = NULL;
 
     if((route_metric_coalesce_next_due.tv_sec == 0 &&
         route_metric_coalesce_next_due.tv_usec == 0) ||
@@ -185,74 +186,120 @@ route_flush_coalesced_metric_updates(void)
 
     while(pending) {
         struct babel_route *r = pending;
-        pending = r->metric_pending_next;
-        r->metric_pending_next = NULL;
-        r->on_metric_list = 0;       /* fully removed from list */
+        struct timeval batch_deadline;
+        int processed_in_batch = 0;
 
-        if(!r->metric_update_pending)
-            continue;  /* cancelled via cancel_coalesce_pending while listed */
+        /* Process batch of up to 50 routes to avoid overwhelming the system.
+           After 50 routes, enforce at least 200ms before next batch. */
+        while(pending && processed_in_batch < 50) {
+            r = pending;
+            pending = r->metric_pending_next;
+            r->metric_pending_next = NULL;
+            r->on_metric_list = 0;       /* fully removed from list */
 
-        if(r->installed != 1 || route_metric(r) >= INFINITY || route_expired(r)) {
-            /* Route became invalid between schedule and flush: discard silently.
-               The right kernel state is handled by uninstall/flush/retract. */
-            r->metric_update_pending = 0;
-            r->metric_update_started.tv_sec = 0;
-            r->metric_update_started.tv_usec = 0;
-            r->metric_update_due.tv_sec = 0;
-            r->metric_update_due.tv_usec = 0;
-            continue;
-        }
+            if(!r->metric_update_pending)
+                continue;  /* cancelled via cancel_coalesce_pending while listed */
 
-        if(timeval_compare(&now, &r->metric_update_due) < 0) {
-            /* Deadline not reached yet: re-enqueue. */
-            r->on_metric_list = 1;
-            r->metric_pending_next = metric_pending_head;
-            metric_pending_head = r;
-            if((next_due.tv_sec == 0 && next_due.tv_usec == 0) ||
-               timeval_compare(&r->metric_update_due, &next_due) < 0)
-                next_due = r->metric_update_due;
-            continue;
-        }
-
-        /* Deadline reached: flush old metric, then re-add with current metric.
-           Save installed_tables before FLUSH: change_route(FLUSH) reads
-           r->installed_table_count to know which tables to remove from, but
-           does not clear it.  We save/restore explicitly to be defensive
-           against any future change to that contract. */
-        {
-            int rc;
-            int saved_count = r->installed_table_count;
-            int saved_tables[MAX_TABLES_PER_FILTER];
-
-            if(saved_count > 0)
-                memcpy(saved_tables, r->installed_tables,
-                       saved_count * sizeof(int));
-
-            rc = change_route(ROUTE_FLUSH, r,
-                              metric_to_kernel(route_metric(r)),
-                              NULL, 0, 0, NULL, NULL, NULL);
-            if(rc < 0 && errno != ESRCH && errno != ENOENT)
-                perror("kernel_route(FLUSH coalesced)");
-
-            if(saved_count > 0 && r->installed_table_count == 0) {
-                memcpy(r->installed_tables, saved_tables,
-                       saved_count * sizeof(int));
-                r->installed_table_count = saved_count;
+            if(r->src == NULL) {
+                r->metric_update_pending = 0;
+                r->metric_update_started.tv_sec = 0;
+                r->metric_update_started.tv_usec = 0;
+                r->metric_update_due.tv_sec = 0;
+                r->metric_update_due.tv_usec = 0;
+                continue;
             }
 
-            rc = change_route(ROUTE_ADD, r,
-                              metric_to_kernel(route_metric(r)),
-                              NULL, 0, 0, NULL,
-                              r->installed_tables,
-                              &r->installed_table_count);
-            if(rc < 0 && errno != EEXIST)
-                perror("kernel_route(ADD coalesced)");
+            if(r->installed != 1 || route_metric(r) >= INFINITY || route_expired(r)) {
+                /* Route became invalid between schedule and flush: discard silently.
+                   The right kernel state is handled by uninstall/flush/retract. */
+                r->metric_update_pending = 0;
+                r->metric_update_started.tv_sec = 0;
+                r->metric_update_started.tv_usec = 0;
+                r->metric_update_due.tv_sec = 0;
+                r->metric_update_due.tv_usec = 0;
+                continue;
+            }
 
-            r->metric_update_pending = 0;
-            r->metric_update_started.tv_sec = 0;
-            r->metric_update_started.tv_usec = 0;
-            r->metric_update_due.tv_sec = 0;
-            r->metric_update_due.tv_usec = 0;
+            if(timeval_compare(&now, &r->metric_update_due) < 0) {
+                /* Deadline not reached yet: re-enqueue. */
+                r->on_metric_list = 1;
+                r->metric_pending_next = metric_pending_head;
+                metric_pending_head = r;
+                if(metric_requeue_tail == NULL)
+                    metric_requeue_tail = r;
+                if((next_due.tv_sec == 0 && next_due.tv_usec == 0) ||
+                   timeval_compare(&r->metric_update_due, &next_due) < 0)
+                    next_due = r->metric_update_due;
+                continue;
+            }
+
+            /* Deadline reached: flush old metric, then re-add with current metric.
+               Save installed_tables before FLUSH: change_route(FLUSH) reads
+               r->installed_table_count to know which tables to remove from, but
+               does not clear it.  We save/restore explicitly to be defensive
+               against any future change to that contract. */
+            {
+                int rc;
+                int saved_count = r->installed_table_count;
+                int saved_tables[MAX_TABLES_PER_FILTER];
+
+                if(saved_count < 0 || saved_count > MAX_TABLES_PER_FILTER)
+                    saved_count = 0;
+
+                if(saved_count > 0)
+                    memcpy(saved_tables, r->installed_tables,
+                           saved_count * sizeof(int));
+
+                rc = change_route(ROUTE_FLUSH, r,
+                                  metric_to_kernel(route_metric(r)),
+                                  NULL, 0, 0, NULL, NULL, NULL);
+                if(rc < 0 && errno != ESRCH && errno != ENOENT)
+                    perror("kernel_route(FLUSH coalesced)");
+
+                if(saved_count > 0 && r->installed_table_count == 0) {
+                    memcpy(r->installed_tables, saved_tables,
+                           saved_count * sizeof(int));
+                    r->installed_table_count = saved_count;
+                }
+
+                rc = change_route(ROUTE_ADD, r,
+                                  metric_to_kernel(route_metric(r)),
+                                  NULL, 0, 0, NULL,
+                                  r->installed_tables,
+                                  &r->installed_table_count);
+                if(rc < 0 && errno != EEXIST)
+                    perror("kernel_route(ADD coalesced)");
+
+                r->metric_update_pending = 0;
+                r->metric_update_started.tv_sec = 0;
+                r->metric_update_started.tv_usec = 0;
+                r->metric_update_due.tv_sec = 0;
+                r->metric_update_due.tv_usec = 0;
+            }
+            processed_in_batch++;
+        }
+
+        /* If we have more routes pending and we've processed a full batch,
+           re-attach remaining routes and enforce 200ms minimum delay. */
+        if(pending && processed_in_batch >= 50) {
+            if(metric_pending_head == NULL) {
+                metric_pending_head = pending;
+            } else if(metric_requeue_tail != NULL) {
+                metric_requeue_tail->metric_pending_next = pending;
+            } else {
+                struct babel_route *tail = metric_pending_head;
+                while(tail->metric_pending_next)
+                    tail = tail->metric_pending_next;
+                tail->metric_pending_next = pending;
+            }
+            pending = NULL;
+            /* Enforce 200ms minimum before next batch */
+            timeval_add_msec(&batch_deadline, &now, 200);
+            if((next_due.tv_sec == 0 && next_due.tv_usec == 0) ||
+               timeval_compare(&batch_deadline, &next_due) > 0)
+                next_due = batch_deadline;
+        } else {
+            pending = NULL;  /* ensure pending is NULL when loop exits normally */
         }
     }
 
@@ -302,6 +349,7 @@ route_flush_deferred_ecmp_reprograms(void)
 {
     struct babel_route *pending;
     struct timeval next_due = {0, 0};
+    struct babel_route *ecmp_requeue_tail = NULL;
 
     if((ecmp_coalesce_next_due.tv_sec == 0 &&
         ecmp_coalesce_next_due.tv_usec == 0) ||
@@ -313,32 +361,76 @@ route_flush_deferred_ecmp_reprograms(void)
 
     while(pending) {
         struct babel_route *r = pending;
-        pending = r->ecmp_pending_next;
-        r->ecmp_pending_next = NULL;
-        r->on_ecmp_list = 0;
+        struct timeval batch_deadline;
+        int processed_in_batch = 0;
 
-        if(!r->ecmp_reprogram_pending)
-            continue;  /* cancelled via cancel_coalesce_pending while listed */
+        /* Process batch of up to 50 routes to avoid overwhelming the system.
+           After 50 routes, enforce at least 200ms before next batch. */
+        while(pending && processed_in_batch < 50) {
+            r = pending;
+            pending = r->ecmp_pending_next;
+            r->ecmp_pending_next = NULL;
+            r->on_ecmp_list = 0;
 
-        if(timeval_compare(&now, &r->ecmp_reprogram_due) < 0) {
-            /* Not yet due: re-enqueue. */
-            r->on_ecmp_list = 1;
-            r->ecmp_pending_next = ecmp_pending_head;
-            ecmp_pending_head = r;
-            if((next_due.tv_sec == 0 && next_due.tv_usec == 0) ||
-               timeval_compare(&r->ecmp_reprogram_due, &next_due) < 0)
-                next_due = r->ecmp_reprogram_due;
-            continue;
+            if(!r->ecmp_reprogram_pending)
+                continue;  /* cancelled via cancel_coalesce_pending while listed */
+
+            if(r->src == NULL || r->installed <= 0 ||
+               route_metric(r) >= INFINITY || route_expired(r)) {
+                r->ecmp_reprogram_pending = 0;
+                r->ecmp_reprogram_started.tv_sec = 0;
+                r->ecmp_reprogram_started.tv_usec = 0;
+                r->ecmp_reprogram_due.tv_sec = 0;
+                r->ecmp_reprogram_due.tv_usec = 0;
+                continue;
+            }
+
+            if(timeval_compare(&now, &r->ecmp_reprogram_due) < 0) {
+                /* Not yet due: re-enqueue. */
+                r->on_ecmp_list = 1;
+                r->ecmp_pending_next = ecmp_pending_head;
+                ecmp_pending_head = r;
+                if(ecmp_requeue_tail == NULL)
+                    ecmp_requeue_tail = r;
+                if((next_due.tv_sec == 0 && next_due.tv_usec == 0) ||
+                   timeval_compare(&r->ecmp_reprogram_due, &next_due) < 0)
+                    next_due = r->ecmp_reprogram_due;
+                continue;
+            }
+
+            debugf("ecmp_reprogram: flushing deferred reprogram for %s\n",
+                   format_prefix(r->src->prefix, r->src->plen));
+            refresh_installed_ranks_ext(r, 1);
+            r->ecmp_reprogram_pending = 0;
+            r->ecmp_reprogram_started.tv_sec = 0;
+            r->ecmp_reprogram_started.tv_usec = 0;
+            r->ecmp_reprogram_due.tv_sec = 0;
+            r->ecmp_reprogram_due.tv_usec = 0;
+            processed_in_batch++;
         }
 
-        debugf("ecmp_reprogram: flushing deferred reprogram for %s\n",
-               format_prefix(r->src->prefix, r->src->plen));
-        refresh_installed_ranks_ext(r, 1);
-        r->ecmp_reprogram_pending = 0;
-        r->ecmp_reprogram_started.tv_sec = 0;
-        r->ecmp_reprogram_started.tv_usec = 0;
-        r->ecmp_reprogram_due.tv_sec = 0;
-        r->ecmp_reprogram_due.tv_usec = 0;
+        /* If we have more routes pending and we've processed a full batch,
+           re-attach remaining routes and enforce 200ms minimum delay. */
+        if(pending && processed_in_batch >= 50) {
+            if(ecmp_pending_head == NULL) {
+                ecmp_pending_head = pending;
+            } else if(ecmp_requeue_tail != NULL) {
+                ecmp_requeue_tail->ecmp_pending_next = pending;
+            } else {
+                struct babel_route *tail = ecmp_pending_head;
+                while(tail->ecmp_pending_next)
+                    tail = tail->ecmp_pending_next;
+                tail->ecmp_pending_next = pending;
+            }
+            pending = NULL;
+            /* Enforce 200ms minimum before next batch */
+            timeval_add_msec(&batch_deadline, &now, 200);
+            if((next_due.tv_sec == 0 && next_due.tv_usec == 0) ||
+               timeval_compare(&batch_deadline, &next_due) > 0)
+                next_due = batch_deadline;
+        } else {
+            pending = NULL;  /* ensure pending is NULL when loop exits normally */
+        }
     }
 
     ecmp_coalesce_next_due = next_due;
@@ -971,6 +1063,7 @@ flush_route(struct babel_route *route)
         }
 
         assert(removed);
+        cancel_coalesce_pending(route);
         destroy_route(route);
 
         if(routes[i] == NULL) {
