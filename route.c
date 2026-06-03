@@ -259,23 +259,6 @@ route_flush_coalesced_metric_updates(void)
     route_metric_coalesce_next_due = next_due;
 }
 
-/* Compute a simple hash of the nexthop set for caching/comparison.
-   Hashes nexthop list (weight, ifindex, gateway) to detect changes. */
-static unsigned int
-compute_nexthop_hash(const struct kernel_nexthop *nexthops, int count)
-{
-    int i;
-    unsigned int hash = 0;
-
-    for(i = 0; i < count; i++) {
-        hash = (hash * 31) + nexthops[i].ifindex;
-        hash = (hash * 31) + nexthops[i].weight;
-        if(nexthops[i].gate)
-            hash ^= *(unsigned int*)&nexthops[i].gate[0];
-    }
-    return hash;
-}
-
 static void
 schedule_ecmp_reprogram(struct babel_route *route)
 {

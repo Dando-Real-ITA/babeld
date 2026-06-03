@@ -55,7 +55,6 @@ struct babel_route {
        Using the route struct itself as the list node avoids any malloc. */
     struct babel_route *metric_pending_next;
     struct babel_route *ecmp_pending_next;
-    unsigned int nexthop_hash;           /* fingerprint of current nexthop set (for caching) */
     int installed_tables[MAX_TABLES_PER_FILTER];  /* Array of kernel routing tables */
     int installed_table_count;                     /* Number of tables route is installed in */
     struct babel_route *next;
