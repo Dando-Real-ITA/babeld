@@ -72,6 +72,7 @@ THE SOFTWARE.
 #include "util.h"
 #include "interface.h"
 #include "configuration.h"
+#include "xroute.h"
 
 #ifndef MAX_INTERFACES
 #define MAX_INTERFACES 1024
@@ -498,6 +499,21 @@ netlink_read(struct netlink *nl, struct netlink *nl_ignore, int answer,
                 }
                 return -1;
             }
+
+            if(errno == ENOBUFS) {
+                /* Kernel dropped netlink notifications.  Force an immediate
+                   userspace resync so route/interface state converges quickly. */
+                fprintf(stderr,
+                        "netlink_read: recvmsg(): No buffer space available, forcing resync.\n");
+                if(!answer && nl == &nl_listen) {
+                    check_interfaces();
+                    if(check_xroutes(1, 0, 0) < 0)
+                        fprintf(stderr,
+                                "Warning: couldn't resync exported routes after ENOBUFS.\n");
+                }
+                return 0;
+            }
+
             perror("netlink_read: recvmsg()");
             return -1;
         } else if(len == 0) {
