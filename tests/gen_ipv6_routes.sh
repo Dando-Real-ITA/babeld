@@ -71,7 +71,7 @@ for ((i=0; i<COUNT; i++)); do
 
     prefix=$(printf "2001:db8:%x:%x:%x:%x:%x::/%d" $a $b $c $d $e $plen)
 
-    if ip -6 route "$ACTION" "$prefix" dev "$IFACE" proto 300 2>/dev/null; then
+    if ip -6 route "$ACTION" "$prefix" dev "$IFACE" proto 255 2>/dev/null; then
         (( added++ ))
     else
         (( fail++ ))
