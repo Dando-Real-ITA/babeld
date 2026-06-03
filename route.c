@@ -48,13 +48,319 @@ int allow_duplicates = -1;
 int has_duplicate_default = 0;
 int multipath_ecmp = 0;
 int ecmp_metric_window = DEFAULT_ECMP_METRIC_WINDOW;
+int route_metric_coalesce_msec = DEFAULT_ROUTE_METRIC_COALESCE_MSEC;
+int ecmp_coalesce_msec = DEFAULT_ECMP_COALESCE_MSEC;
 
 int smoothing_half_life = 0;
 int two_to_the_one_over_hl = 0; /* 2^(1/hl) * 0x10000 */
 static int kernel_route_operation_depth = 0;
+static struct timeval route_metric_coalesce_next_due = {0, 0};
+static struct timeval ecmp_coalesce_next_due = {0, 0};
+
+/* Intrusive singly-linked lists of routes with a pending coalesce action.
+   Each route has an on_metric_list / on_ecmp_list flag that doubles as
+   an O(1) membership test: schedule_*() just checks the flag and skips
+   the enqueue if already set, with no list walk needed. */
+static struct babel_route *metric_pending_head = NULL;
+static struct babel_route *ecmp_pending_head = NULL;
+
+/* Remove route from the metric pending list.  O(pending_count), called
+   only on infrequent cancel paths (install/uninstall/switch/destroy). */
+static void
+metric_pending_remove(struct babel_route *route)
+{
+    struct babel_route **pp = &metric_pending_head;
+    while(*pp) {
+        if(*pp == route) {
+            *pp = route->metric_pending_next;
+            route->metric_pending_next = NULL;
+            route->on_metric_list = 0;
+            return;
+        }
+        pp = &(*pp)->metric_pending_next;
+    }
+}
+
+static void
+ecmp_pending_remove(struct babel_route *route)
+{
+    struct babel_route **pp = &ecmp_pending_head;
+    while(*pp) {
+        if(*pp == route) {
+            *pp = route->ecmp_pending_next;
+            route->ecmp_pending_next = NULL;
+            route->on_ecmp_list = 0;
+            return;
+        }
+        pp = &(*pp)->ecmp_pending_next;
+    }
+}
+
+/* Cancel any pending coalesce for route and remove it from the lists.
+   Call this before any operation that makes a pending coalesce stale
+   (install, uninstall, switch, destroy). */
+static void
+cancel_coalesce_pending(struct babel_route *route)
+{
+    if(route->on_metric_list) {
+        metric_pending_remove(route);
+        route->metric_update_pending = 0;
+        route->metric_update_started.tv_sec = 0;
+        route->metric_update_started.tv_usec = 0;
+        route->metric_update_due.tv_sec = 0;
+        route->metric_update_due.tv_usec = 0;
+    }
+    if(route->on_ecmp_list) {
+        ecmp_pending_remove(route);
+        route->ecmp_reprogram_pending = 0;
+        route->ecmp_reprogram_started.tv_sec = 0;
+        route->ecmp_reprogram_started.tv_usec = 0;
+        route->ecmp_reprogram_due.tv_sec = 0;
+        route->ecmp_reprogram_due.tv_usec = 0;
+    }
+}
 
 static void refresh_installed_ranks_ext(struct babel_route *route,
                                         int force_reprogram);
+static int route_expired(struct babel_route *route);
+
+static void
+schedule_route_metric_coalesce(struct babel_route *route)
+{
+    int coalesce_ms;
+    struct timeval due;
+    struct timeval max_due;
+
+    if(route == NULL)
+        return;
+
+    /* Enforce minimum 200ms and keep millisecond precision. */
+    coalesce_ms = MAX(route_metric_coalesce_msec, 200);
+
+    /* Arm the coalescing window start only on the first call. */
+    if(route->metric_update_started.tv_sec == 0 &&
+       route->metric_update_started.tv_usec == 0)
+        route->metric_update_started = now;
+
+    timeval_add_msec(&due, &now, coalesce_ms);
+    timeval_add_msec(&max_due, &route->metric_update_started,
+                     MAX_ROUTE_METRIC_COALESCE_MSEC);
+
+    route->metric_update_due =
+        (timeval_compare(&due, &max_due) > 0) ? max_due : due;
+    route->metric_update_pending = 1;
+
+    /* O(1) membership test: the flag tells us instantly whether this route
+       is already in the list, so no list walk is needed. */
+    if(!route->on_metric_list) {
+        route->on_metric_list = 1;
+        route->metric_pending_next = metric_pending_head;
+        metric_pending_head = route;
+    }
+
+    if((route_metric_coalesce_next_due.tv_sec == 0 &&
+        route_metric_coalesce_next_due.tv_usec == 0) ||
+       timeval_compare(&route->metric_update_due,
+                       &route_metric_coalesce_next_due) < 0)
+        route_metric_coalesce_next_due = route->metric_update_due;
+}
+
+void
+route_flush_coalesced_metric_updates(void)
+{
+    struct babel_route *pending;
+    struct timeval next_due = {0, 0};
+
+    if((route_metric_coalesce_next_due.tv_sec == 0 &&
+        route_metric_coalesce_next_due.tv_usec == 0) ||
+       timeval_compare(&now, &route_metric_coalesce_next_due) < 0)
+        return;
+
+    /* Detach the entire list at once; we rebuild it below for entries not
+       yet due.  This is safe: schedule_*() may run concurrently in the
+       same event-loop iteration and will simply push new entries onto the
+       now-empty head, which we pick up on the next call. */
+    pending = metric_pending_head;
+    metric_pending_head = NULL;
+
+    while(pending) {
+        struct babel_route *r = pending;
+        pending = r->metric_pending_next;
+        r->metric_pending_next = NULL;
+        r->on_metric_list = 0;       /* fully removed from list */
+
+        if(!r->metric_update_pending)
+            continue;  /* cancelled via cancel_coalesce_pending while listed */
+
+        if(r->installed != 1 || route_metric(r) >= INFINITY || route_expired(r)) {
+            /* Route became invalid between schedule and flush: discard silently.
+               The right kernel state is handled by uninstall/flush/retract. */
+            r->metric_update_pending = 0;
+            r->metric_update_started.tv_sec = 0;
+            r->metric_update_started.tv_usec = 0;
+            r->metric_update_due.tv_sec = 0;
+            r->metric_update_due.tv_usec = 0;
+            continue;
+        }
+
+        if(timeval_compare(&now, &r->metric_update_due) < 0) {
+            /* Deadline not reached yet: re-enqueue. */
+            r->on_metric_list = 1;
+            r->metric_pending_next = metric_pending_head;
+            metric_pending_head = r;
+            if((next_due.tv_sec == 0 && next_due.tv_usec == 0) ||
+               timeval_compare(&r->metric_update_due, &next_due) < 0)
+                next_due = r->metric_update_due;
+            continue;
+        }
+
+        /* Deadline reached: flush old metric, then re-add with current metric.
+           Save installed_tables before FLUSH: change_route(FLUSH) reads
+           r->installed_table_count to know which tables to remove from, but
+           does not clear it.  We save/restore explicitly to be defensive
+           against any future change to that contract. */
+        {
+            int rc;
+            int saved_count = r->installed_table_count;
+            int saved_tables[MAX_TABLES_PER_FILTER];
+
+            if(saved_count > 0)
+                memcpy(saved_tables, r->installed_tables,
+                       saved_count * sizeof(int));
+
+            rc = change_route(ROUTE_FLUSH, r,
+                              metric_to_kernel(route_metric(r)),
+                              NULL, 0, 0, NULL, NULL, NULL);
+            if(rc < 0 && errno != ESRCH && errno != ENOENT)
+                perror("kernel_route(FLUSH coalesced)");
+
+            if(saved_count > 0 && r->installed_table_count == 0) {
+                memcpy(r->installed_tables, saved_tables,
+                       saved_count * sizeof(int));
+                r->installed_table_count = saved_count;
+            }
+
+            rc = change_route(ROUTE_ADD, r,
+                              metric_to_kernel(route_metric(r)),
+                              NULL, 0, 0, NULL,
+                              r->installed_tables,
+                              &r->installed_table_count);
+            if(rc < 0 && errno != EEXIST)
+                perror("kernel_route(ADD coalesced)");
+
+            r->metric_update_pending = 0;
+            r->metric_update_started.tv_sec = 0;
+            r->metric_update_started.tv_usec = 0;
+            r->metric_update_due.tv_sec = 0;
+            r->metric_update_due.tv_usec = 0;
+        }
+    }
+
+    route_metric_coalesce_next_due = next_due;
+}
+
+/* Compute a simple hash of the nexthop set for caching/comparison.
+   Hashes nexthop list (weight, ifindex, gateway) to detect changes. */
+static unsigned int
+compute_nexthop_hash(const struct kernel_nexthop *nexthops, int count)
+{
+    int i;
+    unsigned int hash = 0;
+
+    for(i = 0; i < count; i++) {
+        hash = (hash * 31) + nexthops[i].ifindex;
+        hash = (hash * 31) + nexthops[i].weight;
+        if(nexthops[i].gate)
+            hash ^= *(unsigned int*)&nexthops[i].gate[0];
+    }
+    return hash;
+}
+
+static void
+schedule_ecmp_reprogram(struct babel_route *route)
+{
+    int coalesce_ms;
+    struct timeval due;
+    struct timeval max_due;
+
+    if(route == NULL)
+        return;
+
+    /* Enforce minimum 200ms and keep millisecond precision. */
+    coalesce_ms = MAX(ecmp_coalesce_msec, 200);
+
+    if(route->ecmp_reprogram_started.tv_sec == 0 &&
+       route->ecmp_reprogram_started.tv_usec == 0)
+        route->ecmp_reprogram_started = now;
+
+    timeval_add_msec(&due, &now, coalesce_ms);
+    timeval_add_msec(&max_due, &route->ecmp_reprogram_started,
+                     MAX_ECMP_COALESCE_MSEC);
+
+    route->ecmp_reprogram_due =
+        (timeval_compare(&due, &max_due) > 0) ? max_due : due;
+    route->ecmp_reprogram_pending = 1;
+
+    /* O(1) membership test: only enqueue if not already in the list. */
+    if(!route->on_ecmp_list) {
+        route->on_ecmp_list = 1;
+        route->ecmp_pending_next = ecmp_pending_head;
+        ecmp_pending_head = route;
+    }
+
+    if((ecmp_coalesce_next_due.tv_sec == 0 &&
+        ecmp_coalesce_next_due.tv_usec == 0) ||
+       timeval_compare(&route->ecmp_reprogram_due, &ecmp_coalesce_next_due) < 0)
+        ecmp_coalesce_next_due = route->ecmp_reprogram_due;
+}
+
+void
+route_flush_deferred_ecmp_reprograms(void)
+{
+    struct babel_route *pending;
+    struct timeval next_due = {0, 0};
+
+    if((ecmp_coalesce_next_due.tv_sec == 0 &&
+        ecmp_coalesce_next_due.tv_usec == 0) ||
+       timeval_compare(&now, &ecmp_coalesce_next_due) < 0)
+        return;
+
+    pending = ecmp_pending_head;
+    ecmp_pending_head = NULL;
+
+    while(pending) {
+        struct babel_route *r = pending;
+        pending = r->ecmp_pending_next;
+        r->ecmp_pending_next = NULL;
+        r->on_ecmp_list = 0;
+
+        if(!r->ecmp_reprogram_pending)
+            continue;  /* cancelled via cancel_coalesce_pending while listed */
+
+        if(timeval_compare(&now, &r->ecmp_reprogram_due) < 0) {
+            /* Not yet due: re-enqueue. */
+            r->on_ecmp_list = 1;
+            r->ecmp_pending_next = ecmp_pending_head;
+            ecmp_pending_head = r;
+            if((next_due.tv_sec == 0 && next_due.tv_usec == 0) ||
+               timeval_compare(&r->ecmp_reprogram_due, &next_due) < 0)
+                next_due = r->ecmp_reprogram_due;
+            continue;
+        }
+
+        debugf("ecmp_reprogram: flushing deferred reprogram for %s\n",
+               format_prefix(r->src->prefix, r->src->plen));
+        refresh_installed_ranks_ext(r, 1);
+        r->ecmp_reprogram_pending = 0;
+        r->ecmp_reprogram_started.tv_sec = 0;
+        r->ecmp_reprogram_started.tv_usec = 0;
+        r->ecmp_reprogram_due.tv_sec = 0;
+        r->ecmp_reprogram_due.tv_usec = 0;
+    }
+
+    ecmp_coalesce_next_due = next_due;
+}
+
 
 int
 kernel_route_operation_in_progress(void)
@@ -463,6 +769,15 @@ insert_route(struct babel_route *route)
 
     assert(!route->installed);
 
+    /* Add to per-neighbor route list */
+    if(route->neigh) {
+        route->neigh_route_next = route->neigh->routes;
+        route->neigh_route_prev = NULL;
+        if(route->neigh->routes)
+            route->neigh->routes->neigh_route_prev = route;
+        route->neigh->routes = route;
+    }
+
     i = find_route_slot(route->src->id,
                         route->src->prefix, route->src->plen,
                         route->src->src_prefix, route->src->src_plen, &n);
@@ -524,6 +839,19 @@ insert_route(struct babel_route *route)
 static void
 destroy_route(struct babel_route *route)
 {
+    /* Remove from per-neighbor route list */
+    if(route->neigh) {
+        if(route->neigh_route_prev)
+            route->neigh_route_prev->neigh_route_next = route->neigh_route_next;
+        else {
+            if(route->neigh->routes == route)
+                route->neigh->routes = route->neigh_route_next;
+        }
+
+        if(route->neigh_route_next)
+            route->neigh_route_next->neigh_route_prev = route->neigh_route_prev;
+    }
+
     free(route);
 }
 
@@ -550,8 +878,8 @@ flush_route(struct babel_route *route)
                         route->src->src_prefix, route->src->src_plen, NULL);
     assert(i >= 0 && i < route_slots);
 
-    /* Debug: show all routes in this slot */
-    {
+    /* Debug: show all routes in this slot (only in verbose mode to avoid overhead) */
+    if(debug >= 2) {
         struct babel_route *dbg_head = routes[i];
         int group_num = 0;
         while(dbg_head) {
@@ -731,52 +1059,37 @@ flush_all_routes()
 void
 flush_neighbour_routes(struct neighbour *neigh)
 {
-    int i;
-
-    i = 0;
-    while(i < route_slots) {
-        struct babel_route *head = routes[i];
-        while(head) {
-            struct babel_route *r = head;
-            while(r) {
-                if(r->neigh == neigh) {
-                    flush_route(r);
-                    goto again;
-                }
-                r = r->multipath;
-            }
-            head = head->next;
-        }
-        i++;
-    again:
-        ;
+    /* Use per-neighbor route list: avoids O(route_slots) full-table scan. */
+    while(neigh->routes) {
+        /* flush_route -> destroy_route unlinks from neigh->routes, so
+           always flush the current head until the list is empty. */
+        flush_route(neigh->routes);
     }
 }
 
 void
 flush_interface_routes(struct interface *ifp, int v4only)
 {
-    int i;
+    struct neighbour *neigh;
 
-    i = 0;
-    while(i < route_slots) {
-        struct babel_route *head = routes[i];
-        while(head) {
-            struct babel_route *r = head;
+    /* Iterate only neighbors on this interface, then use their route lists.
+       This avoids an O(route_slots) full-table scan. */
+    FOR_ALL_NEIGHBOURS(neigh) {
+        if(neigh->ifp != ifp)
+            continue;
+    again:
+        {
+            struct babel_route *r = neigh->routes;
             while(r) {
-                if(r->neigh && r->neigh->ifp &&
-                   r->neigh->ifp == ifp &&
-                   (!v4only || v4mapped(r->nexthop))) {
+                if(!v4only || v4mapped(r->nexthop)) {
                     flush_route(r);
+                    /* flush_route -> destroy_route modifies neigh->routes;
+                       restart the scan from the new head. */
                     goto again;
                 }
-                r = r->multipath;
+                r = r->neigh_route_next;
             }
-            head = head->next;
         }
-        i++;
-    again:
-        ;
     }
 }
 
@@ -1243,17 +1556,11 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
         while(slot_head) {
             r = slot_head;
             while(r) {
-                const char *ifname = "(null)";
                 int ifindex = -1;
 
                 if(r->neigh && r->neigh->ifp) {
-                    ifname = r->neigh->ifp->name;
                     ifindex = r->neigh->ifp->ifindex;
                 }
-
-                debugf("  member %p: installed=%d tables=%d metric=%d via %s if %s\n",
-                       (void*)r, r->installed, r->installed_table_count,
-                       route_metric(r), format_address(r->nexthop), ifname);
 
                 if(r->installed > 0)
                     installed_member_count++;
@@ -1273,6 +1580,18 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
                         copy_count = MAX_TABLES_PER_FILTER;
                     memcpy(old_tables, r->installed_tables, copy_count * sizeof(int));
                     old_table_count = copy_count;
+                }
+
+                /* Debug output: only compute and log ifname in verbose mode */
+                if(debug >= 2) {
+                    const char *ifname = "(null)";
+                    if(r->neigh && r->neigh->ifp) {
+                        ifname = r->neigh->ifp->name;
+                    }
+
+                    debugf("  member %p: installed=%d tables=%d metric=%d via %s if %s\n",
+                           (void*)r, r->installed, r->installed_table_count,
+                           route_metric(r), format_address(r->nexthop), ifname);
                 }
 
                 /* Collect kernel-present nexthops for change detection */
@@ -1857,6 +2176,8 @@ install_route(struct babel_route *route)
         return;
     }
 
+    cancel_coalesce_pending(route);
+
     refresh_installed_ranks(route);
 
     local_notify_route(route, LOCAL_CHANGE);
@@ -1882,6 +2203,7 @@ uninstall_route(struct babel_route *route)
        This prevents flush_route() from trying to reprogram ECMP routes
        that we're abandoning (e.g. during shutdown with EINTR). */
     clear_installed_ranks(route, 1);
+    cancel_coalesce_pending(route);
     local_notify_route(route, LOCAL_CHANGE);
 }
 
@@ -1921,6 +2243,8 @@ switch_routes(struct babel_route *old, struct babel_route *new)
     }
 
     old->installed_table_count = 0;
+    cancel_coalesce_pending(old);
+    cancel_coalesce_pending(new);
     refresh_installed_ranks(new);
     local_notify_route(old, LOCAL_CHANGE);
     local_notify_route(new, LOCAL_CHANGE);
@@ -1984,11 +2308,19 @@ change_route_metric(struct babel_route *route,
                format_prefix(route->src->src_prefix, route->src->src_plen),
              oldmetric, newmetric, route->installed, should_refresh_ecmp);
 
-        /* Let refresh_installed_ranks() handle ALL kernel updates for ECMP.
-           It computes the correct nexthop set (excluding retracted routes)
-           and does a single FLUSH+ADD. Doing ROUTE_MODIFY here would cause
-           duplicate/conflicting kernel operations. */
-          refresh_installed_ranks_ext(route, force_reprogram);
+        /* Defer ECMP reprogram unless force_reprogram is set */
+        if(!force_reprogram) {
+            debugf("change_route_metric: deferring ECMP reprogram for %s by %dms\n",
+                   format_prefix(route->src->prefix, route->src->plen),
+                   ecmp_coalesce_msec);
+            schedule_ecmp_reprogram(route);
+        } else {
+            /* Let refresh_installed_ranks() handle ALL kernel updates for ECMP.
+               It computes the correct nexthop set (excluding retracted routes)
+               and does a single FLUSH+ADD. Doing ROUTE_MODIFY here would cause
+               duplicate/conflicting kernel operations. */
+            refresh_installed_ranks_ext(route, force_reprogram);
+        }
 
         local_notify_route(route, LOCAL_CHANGE);
         return;
@@ -2005,6 +2337,15 @@ change_route_metric(struct babel_route *route,
                 perror("kernel_route(FLUSH hold-down suppress)");
 
             clear_installed_ranks(route, 1);
+            cancel_coalesce_pending(route);
+            goto update_local_state;
+        }
+
+        if(oldmetric < KERNEL_INFINITY && newmetric < KERNEL_INFINITY) {
+            debugf("change_route_metric: deferring kernel update for %s by %dms\n",
+                   format_prefix(route->src->prefix, route->src->plen),
+                   route_metric_coalesce_msec);
+            schedule_route_metric_coalesce(route);
             goto update_local_state;
         }
 
@@ -2018,6 +2359,8 @@ change_route_metric(struct babel_route *route,
             perror("kernel_route(MODIFY metric)");
             return;
         }
+
+        cancel_coalesce_pending(route);
 
         refresh_installed_ranks(route);
     }
@@ -2236,19 +2579,13 @@ update_neighbour_metric(struct neighbour *neigh, int changed)
 {
 
     if(changed) {
-        int i;
+        struct babel_route *r = neigh->routes;
 
-        for(i = 0; i < route_slots; i++) {
-            struct babel_route *head = routes[i];
-            while(head) {
-                struct babel_route *r = head;
-                while(r) {
-                    if(r->neigh == neigh)
-                        update_route_metric(r);
-                    r = r->multipath;
-                }
-                head = head->next;
-            }
+        /* Use per-neighbor route list instead of full-table scan */
+        while(r) {
+            struct babel_route *next_r = r->neigh_route_next;
+            update_route_metric(r);
+            r = next_r;
         }
     }
 
@@ -2258,18 +2595,18 @@ update_neighbour_metric(struct neighbour *neigh, int changed)
 void
 update_interface_metric(struct interface *ifp)
 {
-    int i;
+    struct neighbour *neigh;
 
-    for(i = 0; i < route_slots; i++) {
-        struct babel_route *head = routes[i];
-        while(head) {
-            struct babel_route *r = head;
+    /* Iterate all neighbors on this interface and use their route lists */
+    FOR_ALL_NEIGHBOURS(neigh) {
+        if(neigh->ifp == ifp && neigh->routes) {
+            struct babel_route *r = neigh->routes;
+
             while(r) {
-                if(r->neigh && r->neigh->ifp && r->neigh->ifp == ifp)
-                    update_route_metric(r);
-                r = r->multipath;
+                struct babel_route *next_r = r->neigh_route_next;
+                update_route_metric(r);
+                r = next_r;
             }
-            head = head->next;
         }
     }
 }

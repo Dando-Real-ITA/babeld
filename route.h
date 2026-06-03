@@ -44,6 +44,17 @@ struct babel_route {
     unsigned char ecmp_reprogram_pending; /* deferred ECMP reprogram pending */
     struct timeval ecmp_reprogram_started; /* start of current ECMP coalescing window */
     struct timeval ecmp_reprogram_due;   /* deferred ECMP reprogram deadline */
+    /* Intrusive pending-list membership flags.
+       A flag is 1 while the route pointer lives in the corresponding
+       singly-linked list (metric_pending_head / ecmp_pending_head).
+       Checking the flag is a single load — O(1) — so schedule_*() can
+       skip the enqueue without scanning the list. */
+    unsigned char on_metric_list;        /* route is in the metric coalesce pending list */
+    unsigned char on_ecmp_list;          /* route is in the ECMP reprogram pending list */
+    /* Intrusive next pointers for the two pending lists.
+       Using the route struct itself as the list node avoids any malloc. */
+    struct babel_route *metric_pending_next;
+    struct babel_route *ecmp_pending_next;
     unsigned int nexthop_hash;           /* fingerprint of current nexthop set (for caching) */
     int installed_tables[MAX_TABLES_PER_FILTER];  /* Array of kernel routing tables */
     int installed_table_count;                     /* Number of tables route is installed in */
