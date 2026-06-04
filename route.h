@@ -41,6 +41,7 @@ struct babel_route {
     unsigned char metric_update_pending; /* deferred kernel metric update pending */
     struct timeval metric_update_started; /* start of current coalescing window */
     struct timeval metric_update_due;    /* deferred update deadline */
+    int metric_update_base_kernel_metric; /* kernel metric at coalescing start */
     unsigned char ecmp_reprogram_pending; /* deferred ECMP reprogram pending */
     struct timeval ecmp_reprogram_started; /* start of current ECMP coalescing window */
     struct timeval ecmp_reprogram_due;   /* deferred ECMP reprogram deadline */

@@ -109,6 +109,7 @@ cancel_coalesce_pending(struct babel_route *route)
         route->metric_update_started.tv_usec = 0;
         route->metric_update_due.tv_sec = 0;
         route->metric_update_due.tv_usec = 0;
+        route->metric_update_base_kernel_metric = 0;
     }
     if(route->on_ecmp_list) {
         ecmp_pending_remove(route);
@@ -139,8 +140,11 @@ schedule_route_metric_coalesce(struct babel_route *route)
 
     /* Arm the coalescing window start only on the first call. */
     if(route->metric_update_started.tv_sec == 0 &&
-       route->metric_update_started.tv_usec == 0)
+       route->metric_update_started.tv_usec == 0) {
         route->metric_update_started = now;
+        route->metric_update_base_kernel_metric =
+            metric_to_kernel(route_metric(route));
+    }
 
     timeval_add_msec(&due, &now, coalesce_ms);
     timeval_add_msec(&max_due, &route->metric_update_started,
@@ -242,6 +246,17 @@ route_flush_coalesced_metric_updates(void)
                 int rc;
                 int saved_count = r->installed_table_count;
                 int saved_tables[MAX_TABLES_PER_FILTER];
+                int current_metric = metric_to_kernel(route_metric(r));
+
+                if(r->metric_update_base_kernel_metric == current_metric) {
+                    r->metric_update_pending = 0;
+                    r->metric_update_started.tv_sec = 0;
+                    r->metric_update_started.tv_usec = 0;
+                    r->metric_update_due.tv_sec = 0;
+                    r->metric_update_due.tv_usec = 0;
+                    r->metric_update_base_kernel_metric = 0;
+                    continue;
+                }
 
                 if(saved_count < 0 || saved_count > MAX_TABLES_PER_FILTER)
                     saved_count = 0;
@@ -263,7 +278,7 @@ route_flush_coalesced_metric_updates(void)
                 }
 
                 rc = change_route(ROUTE_ADD, r,
-                                  metric_to_kernel(route_metric(r)),
+                                  current_metric,
                                   NULL, 0, 0, NULL,
                                   r->installed_tables,
                                   &r->installed_table_count);
@@ -275,6 +290,7 @@ route_flush_coalesced_metric_updates(void)
                 r->metric_update_started.tv_usec = 0;
                 r->metric_update_due.tv_sec = 0;
                 r->metric_update_due.tv_usec = 0;
+                r->metric_update_base_kernel_metric = 0;
             }
             processed_in_batch++;
         }
@@ -1885,8 +1901,7 @@ update_kernel_if_needed:
     }
 
     if(!set_changed && force_reprogram && old_nexthop_count > 0) {
-        debugf("  set_changed: forced ECMP reprogram\n");
-        set_changed = 1;
+        debugf("  force_reprogram requested but nexthop set unchanged; skipping kernel reprogram\n");
     }
 
     /* If ECMP set changed, reprogram kernel route regardless of metric delta. */
