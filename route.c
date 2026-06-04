@@ -2762,6 +2762,22 @@ update_route(const unsigned char *id,
     feasible = update_feasible(src, seqno, refmetric);
     metric = MIN((int)refmetric + neighbour_cost(neigh) + add_metric, INFINITY);
 
+    /* Fast path for duplicate finite updates from the same neighbour.
+       If nothing relevant changed, only refresh liveness and avoid
+       expensive route processing (change_route_metric/route_changed/
+       ECMP refresh checks). */
+    if(route && refmetric < INFINITY && !hard_retract && nexthop != NULL &&
+       route->src == src &&
+       route->seqno == seqno &&
+       route->refmetric == refmetric &&
+       route->cost == neighbour_cost(neigh) &&
+       route->add_metric == add_metric &&
+       memcmp(route->nexthop, nexthop, 16) == 0) {
+        route->time = now.tv_sec;
+        route->hold_time = hold_time;
+        return route;
+    }
+
     if(route) {
         struct source *oldsrc;
         unsigned short oldmetric;
