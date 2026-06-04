@@ -2766,7 +2766,8 @@ update_route(const unsigned char *id,
        If nothing relevant changed, only refresh liveness and avoid
        expensive route processing (change_route_metric/route_changed/
        ECMP refresh checks). */
-    if(route && refmetric < INFINITY && !hard_retract && nexthop != NULL &&
+     if(route && feasible && refmetric < INFINITY &&
+         !hard_retract && nexthop != NULL &&
        route->src == src &&
        route->seqno == seqno &&
        route->refmetric == refmetric &&
