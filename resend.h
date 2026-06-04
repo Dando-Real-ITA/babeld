@@ -39,6 +39,7 @@ struct resend {
     unsigned char id[8];
     unsigned char update_flags;
     struct interface *ifp;
+    struct resend *hash_next;
     struct resend *next;
 };
 
