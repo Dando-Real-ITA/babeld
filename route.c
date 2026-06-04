@@ -109,6 +109,10 @@ cancel_coalesce_pending(struct babel_route *route)
         route->metric_update_started.tv_usec = 0;
         route->metric_update_due.tv_sec = 0;
         route->metric_update_due.tv_usec = 0;
+        route->metric_update_base_kernel_metric = 0;
+        route->metric_update_base_ifindex = 0;
+        memset(route->metric_update_base_nexthop, 0,
+               sizeof(route->metric_update_base_nexthop));
     }
     if(route->on_ecmp_list) {
         ecmp_pending_remove(route);
@@ -123,6 +127,7 @@ cancel_coalesce_pending(struct babel_route *route)
 static void refresh_installed_ranks_ext(struct babel_route *route,
                                         int force_reprogram);
 static int route_expired(struct babel_route *route);
+static unsigned int route_ifindex_or_zero(const struct babel_route *route);
 
 static void
 schedule_route_metric_coalesce(struct babel_route *route)
@@ -139,8 +144,15 @@ schedule_route_metric_coalesce(struct babel_route *route)
 
     /* Arm the coalescing window start only on the first call. */
     if(route->metric_update_started.tv_sec == 0 &&
-       route->metric_update_started.tv_usec == 0)
+       route->metric_update_started.tv_usec == 0) {
+        unsigned int base_ifindex = route_ifindex_or_zero(route);
         route->metric_update_started = now;
+        route->metric_update_base_kernel_metric =
+            metric_to_kernel(route_metric(route));
+        route->metric_update_base_ifindex = base_ifindex;
+        memcpy(route->metric_update_base_nexthop, route->nexthop,
+               sizeof(route->metric_update_base_nexthop));
+    }
 
     timeval_add_msec(&due, &now, coalesce_ms);
     timeval_add_msec(&max_due, &route->metric_update_started,
@@ -242,6 +254,24 @@ route_flush_coalesced_metric_updates(void)
                 int rc;
                 int saved_count = r->installed_table_count;
                 int saved_tables[MAX_TABLES_PER_FILTER];
+                int current_metric = metric_to_kernel(route_metric(r));
+                unsigned int current_ifindex = route_ifindex_or_zero(r);
+
+                if(r->metric_update_base_kernel_metric == current_metric &&
+                   r->metric_update_base_ifindex == current_ifindex &&
+                   memcmp(r->metric_update_base_nexthop, r->nexthop,
+                          sizeof(r->metric_update_base_nexthop)) == 0) {
+                    r->metric_update_pending = 0;
+                    r->metric_update_started.tv_sec = 0;
+                    r->metric_update_started.tv_usec = 0;
+                    r->metric_update_due.tv_sec = 0;
+                    r->metric_update_due.tv_usec = 0;
+                    r->metric_update_base_kernel_metric = 0;
+                    r->metric_update_base_ifindex = 0;
+                    memset(r->metric_update_base_nexthop, 0,
+                           sizeof(r->metric_update_base_nexthop));
+                    continue;
+                }
 
                 if(saved_count < 0 || saved_count > MAX_TABLES_PER_FILTER)
                     saved_count = 0;
@@ -263,7 +293,7 @@ route_flush_coalesced_metric_updates(void)
                 }
 
                 rc = change_route(ROUTE_ADD, r,
-                                  metric_to_kernel(route_metric(r)),
+                                  current_metric,
                                   NULL, 0, 0, NULL,
                                   r->installed_tables,
                                   &r->installed_table_count);
@@ -275,6 +305,10 @@ route_flush_coalesced_metric_updates(void)
                 r->metric_update_started.tv_usec = 0;
                 r->metric_update_due.tv_sec = 0;
                 r->metric_update_due.tv_usec = 0;
+                r->metric_update_base_kernel_metric = 0;
+                r->metric_update_base_ifindex = 0;
+                memset(r->metric_update_base_nexthop, 0,
+                       sizeof(r->metric_update_base_nexthop));
             }
             processed_in_batch++;
         }
@@ -1670,8 +1704,11 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
                            route_metric(r), format_address(r->nexthop), ifname);
                 }
 
-                /* Collect kernel-present nexthops for change detection */
-                if(r->installed > 0 || r->installed_table_count > 0) {
+                     /* Collect old nexthops for change detection.
+                         Only trust entries that are actually marked installed and
+                         have a valid outgoing interface; stale table bookkeeping
+                         alone is not a reliable old-set signal. */
+                     if(r->installed > 0 && ifindex > 0) {
                     int duplicate = 0;
                     int j;
                     for(j = 0; j < old_nexthop_count; j++) {
@@ -1765,8 +1802,17 @@ refresh_installed_ranks_ext(struct babel_route *route, int force_reprogram)
         
         /* Detect transitions that require reprogramming kernel route. */
         if(old_nexthop_count != 1) {
+            if(old_nexthop_count == 0 && old_table_count > 0 &&
+               old_primary && primary &&
+               old_primary->neigh && old_primary->neigh->ifp &&
+               primary->neigh && primary->neigh->ifp &&
+               old_primary->neigh->ifp->ifindex == primary->neigh->ifp->ifindex &&
+               memcmp(old_primary->nexthop, primary->nexthop, 16) == 0) {
+                debugf("  set_changed: preserving bookkeeping-only single nexthop state\n");
+            } else {
             /* Count changed: 0->1, 2+->1, etc. */
-            set_changed = 1;
+                set_changed = 1;
+            }
         } else if(primary && old_nexthop_count == 1) {
             /* Count stayed 1 — but the actual nexthop may have changed
                (e.g. A retracted, B remains: old gate=A, new gate=B). */
@@ -1885,8 +1931,7 @@ update_kernel_if_needed:
     }
 
     if(!set_changed && force_reprogram && old_nexthop_count > 0) {
-        debugf("  set_changed: forced ECMP reprogram\n");
-        set_changed = 1;
+        debugf("  force_reprogram requested but nexthop set unchanged; skipping kernel reprogram\n");
     }
 
     /* If ECMP set changed, reprogram kernel route regardless of metric delta. */
@@ -2361,6 +2406,14 @@ change_route_metric(struct babel_route *route,
     }
 
     if(multipath_ecmp != ECMP_DISABLED && should_refresh_ecmp) {
+        if(!force_reprogram &&
+           oldmetric == newmetric &&
+           route->refmetric == refmetric &&
+           route->cost == cost &&
+           route->add_metric == add) {
+            goto update_local_state;
+        }
+
         /* For ECMP, always refresh when the route is installed, regardless of
            whether oldmetric == newmetric.  A route may have had its metric
            computed as KERNEL_INFINITY already (e.g. neighbour cost blew up)
