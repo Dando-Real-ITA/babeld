@@ -66,10 +66,14 @@ note_self_kernel_route_delete(const unsigned char *prefix,
                               unsigned char plen,
                               const unsigned char *src_prefix,
                               unsigned char src_plen,
+                              int proto,
                               int table,
                               int metric)
 {
     struct self_delete_suppress *entry;
+
+    if(proto != RTPROT_BABEL)
+        return;
 
     entry = &self_delete_suppressions[
         self_delete_suppress_cursor++ % SELF_DELETE_SUPPRESS_MAX];
@@ -780,6 +784,9 @@ kernel_route_notify(int add, struct kernel_route *kroute, void *closure)
            kroute->src_plen, kroute->table);
 
     if(!add) {
+          /* Self-delete suppression is only for Babel-owned kernel routes.
+              Local/imported routes (for example RTPROT_BABEL_LOCAL xroutes)
+              must still be reconciled normally. */
         if(kroute->proto == RTPROT_BABEL &&
            consume_self_kernel_route_delete(kroute)) {
             debugf("Ignoring self-generated Babel delete notify for %s (src_plen=%d, table=%d, metric=%d).\n",

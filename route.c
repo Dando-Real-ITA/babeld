@@ -2158,6 +2158,7 @@ change_route(int operation, const struct babel_route *route, int metric,
             note_self_kernel_route_delete(route->src->prefix, route->src->plen,
                                           route->src->src_prefix,
                                           route->src->src_plen,
+                                          RTPROT_BABEL,
                                           table, metric);
             /* The Linux flush path also sweeps any unreachable hold-down for
                the same destination.  Suppress reconciliation of that delete
@@ -2165,6 +2166,7 @@ change_route(int operation, const struct babel_route *route, int metric,
             note_self_kernel_route_delete(route->src->prefix, route->src->plen,
                                           route->src->src_prefix,
                                           route->src->src_plen,
+                                          RTPROT_BABEL,
                                           table, KERNEL_INFINITY);
         }
 

@@ -51,6 +51,7 @@ void note_self_kernel_route_delete(const unsigned char *prefix,
                                    unsigned char plen,
                                    const unsigned char *src_prefix,
                                    unsigned char src_plen,
+                                   int proto,
                                    int table,
                                    int metric);
 void kernel_route_notify(int add, struct kernel_route *route, void *closure);
