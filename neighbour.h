@@ -56,6 +56,7 @@ struct neighbour {
     struct timeval challenge_reply_limitation;
     struct interface *ifp;
     struct buffered buf;
+    struct babel_route *routes;  /* head of per-neighbor route list */
 };
 
 extern struct neighbour *neighs;

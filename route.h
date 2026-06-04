@@ -38,10 +38,29 @@ struct babel_route {
     time_t smoothed_metric_time;
     short installed; /* 0: not installed, 1: primary installed, >1: ECMP nexthop rank */
     unsigned char multipath_ever; /* 1 if this group ever had 2+ nexthops installed */
+    unsigned char metric_update_pending; /* deferred kernel metric update pending */
+    struct timeval metric_update_started; /* start of current coalescing window */
+    struct timeval metric_update_due;    /* deferred update deadline */
+    unsigned char ecmp_reprogram_pending; /* deferred ECMP reprogram pending */
+    struct timeval ecmp_reprogram_started; /* start of current ECMP coalescing window */
+    struct timeval ecmp_reprogram_due;   /* deferred ECMP reprogram deadline */
+    /* Intrusive pending-list membership flags.
+       A flag is 1 while the route pointer lives in the corresponding
+       singly-linked list (metric_pending_head / ecmp_pending_head).
+       Checking the flag is a single load — O(1) — so schedule_*() can
+       skip the enqueue without scanning the list. */
+    unsigned char on_metric_list;        /* route is in the metric coalesce pending list */
+    unsigned char on_ecmp_list;          /* route is in the ECMP reprogram pending list */
+    /* Intrusive next pointers for the two pending lists.
+       Using the route struct itself as the list node avoids any malloc. */
+    struct babel_route *metric_pending_next;
+    struct babel_route *ecmp_pending_next;
     int installed_tables[MAX_TABLES_PER_FILTER];  /* Array of kernel routing tables */
     int installed_table_count;                     /* Number of tables route is installed in */
     struct babel_route *next;
     struct babel_route *multipath;
+    struct babel_route *neigh_route_next;        /* per-neighbor route list */
+    struct babel_route *neigh_route_prev;        /* per-neighbor route list */
 };
 
 #ifndef MAX_ECMP_NEXTHOPS
@@ -50,6 +69,22 @@ struct babel_route {
 
 #ifndef DEFAULT_ECMP_METRIC_WINDOW
 #define DEFAULT_ECMP_METRIC_WINDOW 300
+#endif
+
+#ifndef DEFAULT_ROUTE_METRIC_COALESCE_MSEC
+#define DEFAULT_ROUTE_METRIC_COALESCE_MSEC 4000
+#endif
+
+#ifndef MAX_ROUTE_METRIC_COALESCE_MSEC
+#define MAX_ROUTE_METRIC_COALESCE_MSEC 300000
+#endif
+
+#ifndef DEFAULT_ECMP_COALESCE_MSEC
+#define DEFAULT_ECMP_COALESCE_MSEC 4000
+#endif
+
+#ifndef MAX_ECMP_COALESCE_MSEC
+#define MAX_ECMP_COALESCE_MSEC 300000
 #endif
 
 /* multipath_ecmp values */
@@ -65,6 +100,8 @@ extern struct babel_route **routes;
 extern int kernel_metric, allow_duplicates, reflect_kernel_metric, has_duplicate_default;
 extern int multipath_ecmp;
 extern int ecmp_metric_window;
+extern int route_metric_coalesce_msec;
+extern int ecmp_coalesce_msec;
 extern int route_slots;
 extern int smoothing_half_life;
 extern int two_to_the_one_over_hl; /* 2^(1/hl) * 0x10000 */
@@ -153,3 +190,5 @@ void route_changed(struct babel_route *route,
 void route_lost(struct source *src, unsigned oldmetric);
 void route_lost_ext(struct source *src, unsigned oldmetric, int hard_retract);
 void expire_routes(void);
+void route_flush_coalesced_metric_updates(void);
+void route_flush_deferred_ecmp_reprograms(void);

@@ -38,6 +38,67 @@ THE SOFTWARE.
 struct timeval resend_time = {0, 0};
 struct resend *to_resend = NULL;
 
+#define RESEND_HASH_SIZE 4096
+static struct resend *resend_hash[RESEND_HASH_SIZE] = {0};
+
+static unsigned int
+resend_hash_key(int kind,
+                const unsigned char *prefix, unsigned char plen,
+                const unsigned char *src_prefix, unsigned char src_plen)
+{
+    unsigned int h = 2166136261u;
+    int i;
+
+    h = (h ^ (unsigned int)kind) * 16777619u;
+    h = (h ^ (unsigned int)plen) * 16777619u;
+    h = (h ^ (unsigned int)src_plen) * 16777619u;
+
+    for(i = 0; i < 16; i++) {
+        h = (h ^ (unsigned int)prefix[i]) * 16777619u;
+        h = (h ^ (unsigned int)src_prefix[i]) * 16777619u;
+    }
+
+    return h % RESEND_HASH_SIZE;
+}
+
+static void
+resend_hash_insert(struct resend *resend)
+{
+    unsigned int b;
+
+    if(resend == NULL)
+        return;
+
+    b = resend_hash_key(resend->kind,
+                        resend->prefix, resend->plen,
+                        resend->src_prefix, resend->src_plen);
+    resend->hash_next = resend_hash[b];
+    resend_hash[b] = resend;
+}
+
+static void
+resend_hash_remove(struct resend *resend)
+{
+    unsigned int b;
+    struct resend **pp;
+
+    if(resend == NULL)
+        return;
+
+    b = resend_hash_key(resend->kind,
+                        resend->prefix, resend->plen,
+                        resend->src_prefix, resend->src_plen);
+    pp = &resend_hash[b];
+    while(*pp) {
+        if(*pp == resend) {
+            *pp = resend->hash_next;
+            resend->hash_next = NULL;
+            return;
+        }
+        pp = &(*pp)->hash_next;
+    }
+}
+
 static int
 resend_match(struct resend *resend,
              int kind, const unsigned char *prefix, unsigned char plen,
@@ -62,18 +123,18 @@ find_resend(int kind, const unsigned char *prefix, unsigned char plen,
             const unsigned char *src_prefix, unsigned char src_plen,
             struct resend **previous_return)
 {
-    struct resend *current, *previous;
+    struct resend *current;
+    unsigned int b;
 
-    previous = NULL;
-    current = to_resend;
+    if(previous_return)
+        *previous_return = NULL;
+
+    b = resend_hash_key(kind, prefix, plen, src_prefix, src_plen);
+    current = resend_hash[b];
     while(current) {
-        if(resend_match(current, kind, prefix, plen, src_prefix, src_plen)) {
-            if(previous_return)
-                *previous_return = previous;
+        if(resend_match(current, kind, prefix, plen, src_prefix, src_plen))
             return current;
-        }
-        previous = current;
-        current = current->next;
+        current = current->hash_next;
     }
 
     return NULL;
@@ -147,8 +208,10 @@ record_resend(int kind, const unsigned char *prefix, unsigned char plen,
         resend->update_flags = update_flags;
         resend->ifp = ifp;
         resend->time = now;
+        resend->hash_next = NULL;
         resend->next = to_resend;
         to_resend = resend;
+        resend_hash_insert(resend);
     }
 
     if(resend->delay) {
@@ -258,6 +321,7 @@ expire_resend()
     current = to_resend;
     while(current) {
         if(resend_expired(current)) {
+            resend_hash_remove(current);
             if(previous == NULL) {
                 to_resend = current->next;
                 free(current);

@@ -2629,6 +2629,70 @@ void anycast_ecmp_equal_repeated_finite_metric_changes_skip_reprogram_test(void)
     reflect_kernel_metric = old_reflect;
 }
 
+    void singlepath_metric_change_is_coalesced_test(void)
+    {
+        struct babel_route *route;
+        int old_multipath_ecmp = multipath_ecmp;
+        int old_coalesce = route_metric_coalesce_msec;
+        int old_reflect = reflect_kernel_metric;
+        int base_route_calls;
+
+        multipath_ecmp = ECMP_DISABLED;
+        route_metric_coalesce_msec = 1000;
+        reflect_kernel_metric = 1;
+
+        route = routes[0];
+        if(!babel_check(route != NULL && route->installed == 1)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+            "Failed test on singlepath_metric_change_is_coalesced_test setup.\n");
+        multipath_ecmp = old_multipath_ecmp;
+        route_metric_coalesce_msec = old_coalesce;
+        reflect_kernel_metric = old_reflect;
+        return;
+        }
+
+        mocked_kernel_route_calls = 0;
+        base_route_calls = mocked_kernel_route_calls;
+
+        now.tv_sec = 3200;
+        change_route_metric(route,
+                MIN((unsigned)route->refmetric + 8, INFINITY - 1),
+                route->cost,
+                route->add_metric);
+
+        if(!babel_check(mocked_kernel_route_calls == base_route_calls &&
+                route->metric_update_pending == 1)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+            "Failed test on singlepath_metric_change_is_coalesced_test immediate phase.\n");
+        fprintf(stderr,
+            "Expected deferred update with no immediate kernel call; route_calls=%d pending=%d.\n",
+            mocked_kernel_route_calls, route->metric_update_pending);
+        multipath_ecmp = old_multipath_ecmp;
+        route_metric_coalesce_msec = old_coalesce;
+        reflect_kernel_metric = old_reflect;
+        return;
+        }
+
+        now.tv_sec = 3201;
+        route_flush_coalesced_metric_updates();
+
+        if(!babel_check(mocked_kernel_route_calls == base_route_calls + 2 &&
+                route->metric_update_pending == 0)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+            "Failed test on singlepath_metric_change_is_coalesced_test flush phase.\n");
+        fprintf(stderr,
+            "Expected deferred flush+add after 1s; route_calls=%d pending=%d.\n",
+            mocked_kernel_route_calls, route->metric_update_pending);
+        }
+
+        multipath_ecmp = old_multipath_ecmp;
+        route_metric_coalesce_msec = old_coalesce;
+        reflect_kernel_metric = old_reflect;
+    }
+
 void route_stream_traverses_multipath_members_test(void)
 {
     struct interface *ifp = ns[0]->ifp;
@@ -3003,6 +3067,8 @@ void route_test_suite(void)
                    "anycast_ecmp_equal_infinity_retraction_reprograms_kernel_test");
     run_route_test(anycast_ecmp_equal_repeated_finite_metric_changes_skip_reprogram_test,
                    "anycast_ecmp_equal_repeated_finite_metric_changes_skip_reprogram_test");
+    run_route_test(singlepath_metric_change_is_coalesced_test,
+                   "singlepath_metric_change_is_coalesced_test");
     run_route_test(route_stream_traverses_multipath_members_test,
                    "route_stream_traverses_multipath_members_test");
     run_route_test(refresh_promotes_member_preserving_group_test,

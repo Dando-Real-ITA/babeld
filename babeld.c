@@ -91,6 +91,9 @@ int protocol_socket = -1;
 int kernel_socket = -1;
 static int kernel_link_changed = 0;
 static int kernel_addr_changed = 0;
+static int kernel_event_coalesce_msec = 500;
+static struct timeval kernel_link_change_due = {0, 0};
+static struct timeval kernel_addr_change_due = {0, 0};
 int kernel_check_interval = 300;
 int shutdown_delay_msec = -1;
 
@@ -639,8 +642,22 @@ babel_main(char **interface_names, int num_interface_names)
 
         gettime(&now);
 
+        if(kernel_link_changed &&
+           kernel_link_change_due.tv_sec == 0 && kernel_link_change_due.tv_usec == 0)
+            timeval_add_msec(&kernel_link_change_due, &now,
+                             roughly(kernel_event_coalesce_msec));
+
+        if(kernel_addr_changed &&
+           kernel_addr_change_due.tv_sec == 0 && kernel_addr_change_due.tv_usec == 0)
+            timeval_add_msec(&kernel_addr_change_due, &now,
+                             roughly(kernel_event_coalesce_msec));
+
         tv = check_neighbours_timeout;
         timeval_min(&tv, &check_interfaces_timeout);
+        if(kernel_link_change_due.tv_sec != 0 || kernel_link_change_due.tv_usec != 0)
+            timeval_min(&tv, &kernel_link_change_due);
+        if(kernel_addr_change_due.tv_sec != 0 || kernel_addr_change_due.tv_usec != 0)
+            timeval_min(&tv, &kernel_addr_change_due);
         timeval_min_sec(&tv, expiry_time);
         timeval_min_sec(&tv, source_expiry_time);
         if(kernel_check_interval > 0)
@@ -742,7 +759,8 @@ babel_main(char **interface_names, int num_interface_names)
                     if(rc < 0) {
                         if(errno == EINTR || errno == EAGAIN)
                             continue;
-                        perror("read(local_socket)");
+                        if(errno != EPIPE && errno != ECONNRESET)
+                            perror("read(local_socket)");
                     }
                     local_socket_destroy(i);
                 }
@@ -762,18 +780,43 @@ babel_main(char **interface_names, int num_interface_names)
             reopening = 0;
         }
 
-        if(kernel_link_changed || kernel_addr_changed) {
-            check_interfaces();
-            kernel_link_changed = 0;
-        }
+        {
+            int do_interface_check = 0;
+            int addr_due = 0;
+            int periodic_due =
+                (kernel_check_interval > 0 && now.tv_sec >= kernel_dump_time);
 
-        if(kernel_addr_changed ||
-           (kernel_check_interval > 0 && now.tv_sec >= kernel_dump_time)) {
-            rc = check_xroutes(1, !kernel_addr_changed, 0);
-            if(rc < 0)
-                fprintf(stderr, "Warning: couldn't check exported routes.\n");
-            kernel_addr_changed = 0;
-            kernel_dump_time = now.tv_sec + roughly(kernel_check_interval);
+            if(kernel_link_changed &&
+               timeval_compare(&now, &kernel_link_change_due) >= 0) {
+                do_interface_check = 1;
+                kernel_link_changed = 0;
+                kernel_link_change_due.tv_sec = 0;
+                kernel_link_change_due.tv_usec = 0;
+            }
+
+            if(kernel_addr_changed &&
+               timeval_compare(&now, &kernel_addr_change_due) >= 0) {
+                do_interface_check = 1;
+                addr_due = 1;
+            }
+
+            if(do_interface_check)
+                check_interfaces();
+
+            if(addr_due || periodic_due) {
+                rc = check_xroutes(1, !(addr_due || kernel_addr_changed), 0);
+                if(rc < 0)
+                    fprintf(stderr, "Warning: couldn't check exported routes.\n");
+
+                if(addr_due) {
+                    kernel_addr_changed = 0;
+                    kernel_addr_change_due.tv_sec = 0;
+                    kernel_addr_change_due.tv_usec = 0;
+                }
+
+                if(periodic_due)
+                    kernel_dump_time = now.tv_sec + roughly(kernel_check_interval);
+            }
         }
 
         if(timeval_compare(&check_neighbours_timeout, &now) < 0) {
@@ -793,6 +836,9 @@ babel_main(char **interface_names, int num_interface_names)
             init_flow();
             delay_init_flow = 0;
         }
+
+        route_flush_coalesced_metric_updates();
+        route_flush_deferred_ecmp_reprograms();
 
         if(now.tv_sec >= expiry_time) {
             expire_routes();

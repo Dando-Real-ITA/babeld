@@ -1095,6 +1095,40 @@ parse_option(int c, gnc_t gnc, void *closure, char *token)
         if(c < -1 || window < 0 || window > 65535)
             goto error;
         ecmp_metric_window = window;
+    } else if(strcmp(token, "route-metric-coalesce-ms") == 0) {
+        int msecs;
+        c = getint(c, &msecs, gnc, closure);
+        if(c < -1)
+            goto error;
+        if(msecs < 200) {
+            fprintf(stderr,
+                    "Warning: route-metric-coalesce-ms %d too low, clamping to 200.\n",
+                    msecs);
+            msecs = 200;
+        } else if(msecs > MAX_ROUTE_METRIC_COALESCE_MSEC) {
+            fprintf(stderr,
+                    "Warning: route-metric-coalesce-ms %d too high, clamping to %d.\n",
+                    msecs, MAX_ROUTE_METRIC_COALESCE_MSEC);
+            msecs = MAX_ROUTE_METRIC_COALESCE_MSEC;
+        }
+        route_metric_coalesce_msec = msecs;
+    } else if(strcmp(token, "ecmp-coalesce-ms") == 0) {
+        int msecs;
+        c = getint(c, &msecs, gnc, closure);
+        if(c < -1)
+            goto error;
+        if(msecs < 200) {
+            fprintf(stderr,
+                    "Warning: ecmp-coalesce-ms %d too low, clamping to 200.\n",
+                    msecs);
+            msecs = 200;
+        } else if(msecs > MAX_ECMP_COALESCE_MSEC) {
+            fprintf(stderr,
+                    "Warning: ecmp-coalesce-ms %d too high, clamping to %d.\n",
+                    msecs, MAX_ECMP_COALESCE_MSEC);
+            msecs = MAX_ECMP_COALESCE_MSEC;
+        }
+        ecmp_coalesce_msec = msecs;
     } else if(strcmp(token, "protocol-group") == 0) {
         unsigned char *group = NULL;
         c = getip(c, &group, NULL, gnc, closure);
