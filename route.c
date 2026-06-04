@@ -252,9 +252,11 @@ route_flush_coalesced_metric_updates(void)
                against any future change to that contract. */
             {
                 int rc;
+                int rc2;
                 int saved_count = r->installed_table_count;
                 int saved_tables[MAX_TABLES_PER_FILTER];
                 int current_metric = metric_to_kernel(route_metric(r));
+                int flush_metric = r->metric_update_base_kernel_metric;
                 unsigned int current_ifindex = route_ifindex_or_zero(r);
 
                 if(r->metric_update_base_kernel_metric == current_metric &&
@@ -281,10 +283,18 @@ route_flush_coalesced_metric_updates(void)
                            saved_count * sizeof(int));
 
                 rc = change_route(ROUTE_FLUSH, r,
-                                  metric_to_kernel(route_metric(r)),
+                                  flush_metric,
                                   NULL, 0, 0, NULL, NULL, NULL);
                 if(rc < 0 && errno != ESRCH && errno != ENOENT)
                     perror("kernel_route(FLUSH coalesced)");
+
+                if(flush_metric != current_metric) {
+                    rc2 = change_route(ROUTE_FLUSH, r,
+                                       current_metric,
+                                       NULL, 0, 0, NULL, NULL, NULL);
+                    if(rc2 < 0 && errno != ESRCH && errno != ENOENT)
+                        perror("kernel_route(FLUSH coalesced current)");
+                }
 
                 if(saved_count > 0 && r->installed_table_count == 0) {
                     memcpy(r->installed_tables, saved_tables,
@@ -2406,6 +2416,15 @@ change_route_metric(struct babel_route *route,
     }
 
     if(multipath_ecmp != ECMP_DISABLED && should_refresh_ecmp) {
+        if(force_reprogram &&
+           oldmetric == KERNEL_INFINITY &&
+           newmetric == KERNEL_INFINITY &&
+           route->refmetric == refmetric &&
+           route->cost == cost &&
+           route->add_metric == add) {
+            goto update_local_state;
+        }
+
         if(!force_reprogram &&
            oldmetric == newmetric &&
            route->refmetric == refmetric &&
@@ -2453,6 +2472,15 @@ change_route_metric(struct babel_route *route,
 
         local_notify_route(route, LOCAL_CHANGE);
         return;
+    }
+
+    if(multipath_ecmp == ECMP_DISABLED && route->installed > 0 &&
+       oldmetric == KERNEL_INFINITY &&
+       newmetric == KERNEL_INFINITY &&
+       route->refmetric == refmetric &&
+       route->cost == cost &&
+       route->add_metric == add) {
+        goto update_local_state;
     }
 
     if(route->installed > 0 && oldmetric != newmetric) {
