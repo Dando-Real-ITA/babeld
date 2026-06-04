@@ -61,6 +61,12 @@ struct self_delete_suppress {
 static struct self_delete_suppress self_delete_suppressions[SELF_DELETE_SUPPRESS_MAX];
 static int self_delete_suppress_cursor = 0;
 
+static int
+normalise_table(int table)
+{
+    return table == 0 ? 254 : table;
+}
+
 void
 note_self_kernel_route_delete(const unsigned char *prefix,
                               unsigned char plen,
@@ -82,7 +88,7 @@ note_self_kernel_route_delete(const unsigned char *prefix,
     entry->plen = plen;
     memcpy(entry->src_prefix, src_prefix, 16);
     entry->src_plen = src_plen;
-    entry->table = table;
+    entry->table = normalise_table(table);
     entry->metric = metric;
     gettimeofday(&entry->time, NULL);
     entry->used = 1;
@@ -107,7 +113,7 @@ consume_self_kernel_route_delete(const struct kernel_route *kroute)
             continue;
         }
 
-        if(entry->table == kroute->table &&
+        if(entry->table == normalise_table(kroute->table) &&
            entry->metric == kroute->metric &&
            entry->plen == kroute->plen &&
            entry->src_plen == kroute->src_plen &&
@@ -183,12 +189,6 @@ send_covered_xroute_updates(const unsigned char *prefix, unsigned char plen,
         send_update(NULL, 0, xroutes[i].prefix, xroutes[i].plen,
                     xroutes[i].src_prefix, xroutes[i].src_plen);
     }
-}
-
-static int
-normalise_table(int table)
-{
-    return table == 0 ? 254 : table;
 }
 
 static int

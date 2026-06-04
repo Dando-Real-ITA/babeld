@@ -1104,6 +1104,68 @@ kernel_safe_v4viav6(void)
     return (kernel_older_than("Linux", 5, 13) == 0);
 }
 
+static int
+kernel_route_flush_unreachable(int table,
+                               const unsigned char *dest, unsigned short plen,
+                               const unsigned char *src, unsigned short src_plen)
+{
+    union { char raw[1024]; struct nlmsghdr nh; } delbuf;
+    struct rtmsg *del_rtm;
+    struct rtattr *del_rta;
+    int del_len = sizeof(delbuf.raw);
+    int del_ipv4 = v4mapped(dest);
+    int del_use_src = !is_default(src, src_plen);
+    int rc;
+
+    memset(&delbuf, 0, sizeof(delbuf));
+    delbuf.nh.nlmsg_flags = NLM_F_REQUEST;
+    delbuf.nh.nlmsg_type = RTM_DELROUTE;
+
+    del_rtm = NLMSG_DATA(&delbuf.nh);
+    del_rtm->rtm_family = del_ipv4 ? AF_INET : AF_INET6;
+    del_rtm->rtm_dst_len = del_ipv4 ? plen - 96 : plen;
+    if(del_use_src)
+        del_rtm->rtm_src_len = src_plen;
+    del_rtm->rtm_table = table < 256 ? table : RT_TABLE_UNSPEC;
+    del_rtm->rtm_scope = RT_SCOPE_UNIVERSE;
+    del_rtm->rtm_type = RTN_UNREACHABLE;
+    del_rtm->rtm_protocol = RTPROT_BABEL;
+
+    del_rta = RTM_RTA(del_rtm);
+
+    if(table >= 256) {
+        del_rta = RTA_NEXT(del_rta, del_len);
+        del_rta->rta_len = RTA_LENGTH(sizeof(int));
+        del_rta->rta_type = RTA_TABLE;
+        *(int*)RTA_DATA(del_rta) = table;
+    }
+
+    if(del_ipv4) {
+        del_rta = RTA_NEXT(del_rta, del_len);
+        del_rta->rta_len = RTA_LENGTH(sizeof(struct in_addr));
+        del_rta->rta_type = RTA_DST;
+        memcpy(RTA_DATA(del_rta), dest + 12, sizeof(struct in_addr));
+    } else {
+        del_rta = RTA_NEXT(del_rta, del_len);
+        del_rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr));
+        del_rta->rta_type = RTA_DST;
+        memcpy(RTA_DATA(del_rta), dest, sizeof(struct in6_addr));
+        if(del_use_src) {
+            del_rta = RTA_NEXT(del_rta, del_len);
+            del_rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr));
+            del_rta->rta_type = RTA_SRC;
+            memcpy(RTA_DATA(del_rta), src, sizeof(struct in6_addr));
+        }
+    }
+
+    delbuf.nh.nlmsg_len = (char*)del_rta + del_rta->rta_len - delbuf.raw;
+
+    rc = netlink_talk(&delbuf.nh);
+    if(rc < 0 && errno != ESRCH && errno != ENOENT)
+        return rc;
+    return 0;
+}
+
 int
 kernel_route(int operation, int table,
              const unsigned char *dest, unsigned short plen,
@@ -1203,6 +1265,12 @@ kernel_route(int operation, int table,
 
     memset(&buf, 0, sizeof(buf));
     if(operation == ROUTE_ADD) {
+        if(metric < KERNEL_INFINITY) {
+            rc = kernel_route_flush_unreachable(table, dest, plen,
+                                                src, src_plen);
+            if(rc < 0)
+                return rc;
+        }
         buf.nh.nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL;
         buf.nh.nlmsg_type = RTM_NEWROUTE;
     } else {
