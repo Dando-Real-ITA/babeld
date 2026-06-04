@@ -2154,6 +2154,20 @@ change_route(int operation, const struct babel_route *route, int metric,
             newtable = table;
         }
 
+        if(operation == ROUTE_FLUSH || operation == ROUTE_MODIFY) {
+            note_self_kernel_route_delete(route->src->prefix, route->src->plen,
+                                          route->src->src_prefix,
+                                          route->src->src_plen,
+                                          table, metric);
+            /* The Linux flush path also sweeps any unreachable hold-down for
+               the same destination.  Suppress reconciliation of that delete
+               too when the notification arrives asynchronously. */
+            note_self_kernel_route_delete(route->src->prefix, route->src->plen,
+                                          route->src->src_prefix,
+                                          route->src->src_plen,
+                                          table, KERNEL_INFINITY);
+        }
+
         if(operation == ROUTE_FLUSH) {
             int rc_multi, rc_single;
             int errno_multi = 0, errno_single = 0;
