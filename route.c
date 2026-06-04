@@ -189,9 +189,9 @@ route_flush_coalesced_metric_updates(void)
         struct timeval batch_deadline;
         int processed_in_batch = 0;
 
-        /* Process batch of up to 50 routes to avoid overwhelming the system.
-           After 50 routes, enforce at least 200ms before next batch. */
-        while(pending && processed_in_batch < 50) {
+        /* Process batch of up to 500 routes to avoid overwhelming the system.
+           After 500 routes, enforce at least 200ms before next batch. */
+        while(pending && processed_in_batch < 500) {
             r = pending;
             pending = r->metric_pending_next;
             r->metric_pending_next = NULL;
@@ -281,7 +281,7 @@ route_flush_coalesced_metric_updates(void)
 
         /* If we have more routes pending and we've processed a full batch,
            re-attach remaining routes and enforce 200ms minimum delay. */
-        if(pending && processed_in_batch >= 50) {
+        if(pending && processed_in_batch >= 500) {
             if(metric_pending_head == NULL) {
                 metric_pending_head = pending;
             } else if(metric_requeue_tail != NULL) {
@@ -364,9 +364,9 @@ route_flush_deferred_ecmp_reprograms(void)
         struct timeval batch_deadline;
         int processed_in_batch = 0;
 
-        /* Process batch of up to 50 routes to avoid overwhelming the system.
-           After 50 routes, enforce at least 200ms before next batch. */
-        while(pending && processed_in_batch < 50) {
+        /* Process batch of up to 500 routes to avoid overwhelming the system.
+           After 500 routes, enforce at least 200ms before next batch. */
+        while(pending && processed_in_batch < 500) {
             r = pending;
             pending = r->ecmp_pending_next;
             r->ecmp_pending_next = NULL;
@@ -411,7 +411,7 @@ route_flush_deferred_ecmp_reprograms(void)
 
         /* If we have more routes pending and we've processed a full batch,
            re-attach remaining routes and enforce 200ms minimum delay. */
-        if(pending && processed_in_batch >= 50) {
+        if(pending && processed_in_batch >= 500) {
             if(ecmp_pending_head == NULL) {
                 ecmp_pending_head = pending;
             } else if(ecmp_requeue_tail != NULL) {
