@@ -441,6 +441,116 @@ network_address(int ae, const unsigned char *a, unsigned int len,
 }
 
 static struct neighbour *
+preparse_challenge_reply(const unsigned char *from, struct interface *ifp,
+                         const unsigned char *body, int bodylen,
+                         const unsigned char *to)
+{
+    int i;
+    struct neighbour *neigh = NULL;
+    int challenge_success = 0;
+    const unsigned char *pc = NULL, *index = NULL;
+    int index_len = 0;
+    const unsigned char *nonce = NULL;
+    int nonce_len = 0;
+
+    i = 0;
+    while(i < bodylen) {
+        const unsigned char *message = body + 4 + i;
+        unsigned char len, type = message[0];
+        if(type == MESSAGE_PAD1) {
+            i++;
+            continue;
+        }
+        if(i + 2 > bodylen) {
+            fprintf(stderr, "Received truncated message.\n");
+            break;
+        }
+        len = message[1];
+        if(i + len + 2 > bodylen) {
+            fprintf(stderr, "Received truncated message.\n");
+            break;
+        }
+
+        if(type == MESSAGE_PC) {
+            if(index != NULL)
+                goto done;
+
+            if(len < 4) {
+                fprintf(stderr, "Received truncated PC TLV.\n");
+                break;
+            }
+            if(len > 4 + 32) {
+                fprintf(stderr, "Overlong PC TLV.\n");
+                break;
+            }
+
+            pc = message + 2;
+            index = message + 6;
+            index_len = len - 4;
+        } else if(type == MESSAGE_CHALLENGE_REQUEST) {
+            if(to[0] == 0xff)
+                goto done;
+
+            if(len > 192) {
+                fprintf(stderr, "Overlong challenge request TLV.\n");
+                break;
+            }
+
+            nonce = message + 2;
+            nonce_len = len;
+
+            debugf("Received challenge request from %s.\n",
+                   format_address(from));
+        } else if(type == MESSAGE_CHALLENGE_REPLY) {
+            if(len > 192) {
+                fprintf(stderr, "Overlong challenge reply TLV.\n");
+                break;
+            }
+
+            debugf("Received challenge reply from %s.\n",
+                   format_address(from));
+
+            neigh = neigh != NULL ? neigh : find_neighbour(from, ifp);
+            if(neigh == NULL)
+                goto done;
+
+            gettime(&now);
+            if(timeval_compare(&now, &neigh->challenge_deadline) > 0) {
+                debugf("No pending challenge.\n");
+                goto done;
+            }
+
+            if(len == sizeof(neigh->nonce) &&
+               memcmp(neigh->nonce, message + 2, len) == 0) {
+                const struct timeval zero = {0, 0};
+                challenge_success = 1;
+                neigh->challenge_deadline = zero;
+                debugf("Challenge succeeded!\n");
+            } else {
+                debugf("Challenge failed.\n");
+            }
+        }
+done:
+        i += len + 2;
+    }
+
+    if(nonce != NULL) {
+        neigh = neigh != NULL ? neigh : find_neighbour(from, ifp);
+        if(neigh != NULL)
+            send_challenge_reply(neigh, nonce, nonce_len);
+    }
+
+    if(!challenge_success || index == NULL || neigh == NULL)
+        return NULL;
+
+    neigh->index_len = index_len;
+    memcpy(neigh->index, index, index_len);
+    memcpy(neigh->pc_m, pc, 4);
+    memcpy(neigh->pc_u, pc, 4);
+    return neigh;
+}
+
+static struct neighbour *
 preparse_packet(const unsigned char *from, struct interface *ifp,
                 const unsigned char *body, int bodylen,
                 const unsigned char *to)
@@ -637,9 +747,9 @@ parse_packet(const unsigned char *from, struct interface *ifp,
 
         /* Process challenge reply before checking HMAC: the peer's first
            signed packet cannot pass HMAC until the challenge handshake
-           succeeds, so MESSAGE_CHALLENGE_REPLY must be handled
-           unconditionally to break the deadlock. */
-        neigh = preparse_packet(from, ifp, packet, bodylen, to);
+           succeeds.  Keep this pass side-effect minimal: only challenge
+           completion is handled pre-HMAC. */
+        neigh = preparse_challenge_reply(from, ifp, packet, bodylen, to);
 
         rc = check_hmac(packet, packetlen, bodylen, from, to, ifp);
         if(rc <= 0) {
@@ -649,10 +759,10 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                 debugf("Received packet with bad signature.\n");
             if(!(ifp->flags & IF_ACCEPT_BAD_SIGNATURES))
                 return;
-            /* HMAC failed but bad-signature mode is on; clear neigh so
-               the main loop falls through to find_neighbour. */
             neigh = NULL;
         } else {
+            if(neigh == NULL)
+                neigh = preparse_packet(from, ifp, packet, bodylen, to);
             if(neigh == NULL) {
                 debugf("PC check failed.\n");
                 return;
