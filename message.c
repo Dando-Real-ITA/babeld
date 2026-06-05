@@ -1951,6 +1951,28 @@ send_update(struct interface *ifp, int urgent,
                                    0, NULL) != route)
                     continue;
 
+                if(route_metric(route) >= INFINITY) {
+                    struct babel_route *installed;
+
+                    installed = find_installed_route(NULL,
+                                                     route->src->prefix,
+                                                     route->src->plen,
+                                                     route->src->src_prefix,
+                                                     route->src->src_plen,
+                                                     NULL);
+                    if(installed != NULL &&
+                       route_metric(installed) < INFINITY &&
+                       memcmp(installed->src->id, route->src->id, 8) != 0) {
+                        debugf("Skipping specific export of retracted route %s (%s): "
+                               "finite installed source %s is present.\n",
+                               format_prefix(route->src->prefix,
+                                             route->src->plen),
+                               format_eui64(route->src->id),
+                               format_eui64(installed->src->id));
+                        continue;
+                    }
+                }
+
                 debugf("Buffer update for dst %s%s%s on %s (%s, %d).\n",
                        format_prefix(prefix, plen),
                        is_ss ? " src " : "",
