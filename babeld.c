@@ -94,8 +94,8 @@ static int kernel_addr_changed = 0;
 static int kernel_event_coalesce_msec = 500;
 static struct timeval kernel_link_change_due = {0, 0};
 static struct timeval kernel_addr_change_due = {0, 0};
-static struct timeval startup_update_due = {0, 0};
-static int startup_update_pending = 0;
+static struct timeval init_flow_due = {0, 0};
+static int init_flow_pending = 0;
 int kernel_check_interval = 300;
 int shutdown_delay_msec = -1;
 
@@ -483,7 +483,6 @@ babel_main(char **interface_names, int num_interface_names)
     struct sockaddr_in6 sin6;
     void *vrc;
     int i, fd, rc;
-    struct timeval delay_init_timeout;
 
     rc = kernel_setup(1);
     if(rc < 0) {
@@ -626,16 +625,13 @@ babel_main(char **interface_names, int num_interface_names)
     schedule_interfaces_check(30000, 1);
     expiry_time = now.tv_sec + roughly(30);
     source_expiry_time = now.tv_sec + roughly(300);
-    timeval_add_msec(&startup_update_due, &now, 10000);
-    startup_update_pending = 1;
-
-    if(delay_init_flow) {
-        /* Send hellos to trigger challenge start */
-        init_hello();
-        timeval_add_msec(&delay_init_timeout, &now, roughly(30000));
-    } else {
-        init_flow();
-    }
+    /* Always start with hello+retraction only so that challenge/auth
+       exchange can complete before we flood the full self-update.
+       init_flow() will be called from the main loop once at least one
+       neighbour has reached a non-zero hello reachability. */
+    init_hello();
+    init_flow_pending = 1;
+    timeval_add_msec(&init_flow_due, &now, roughly(60000));
 
     debugf("Entering main loop.\n");
 
@@ -666,8 +662,8 @@ babel_main(char **interface_names, int num_interface_names)
         timeval_min_sec(&tv, source_expiry_time);
         if(kernel_check_interval > 0)
             timeval_min_sec(&tv, kernel_dump_time);
-        if(startup_update_pending)
-            timeval_min(&tv, &startup_update_due);
+        if(init_flow_pending)
+            timeval_min(&tv, &init_flow_due);
         timeval_min(&tv, &resend_time);
         FOR_ALL_INTERFACES(ifp) {
             if(!if_up(ifp))
@@ -838,11 +834,6 @@ babel_main(char **interface_names, int num_interface_names)
             schedule_interfaces_check(30000, 1);
         }
 
-        if(delay_init_flow && timeval_compare(&delay_init_timeout, &now) < 0) {
-            init_flow();
-            delay_init_flow = 0;
-        }
-
         route_flush_coalesced_metric_updates();
         route_flush_deferred_ecmp_reprograms();
 
@@ -857,30 +848,29 @@ babel_main(char **interface_names, int num_interface_names)
             source_expiry_time = now.tv_sec + roughly(300);
         }
 
-        if(startup_update_pending &&
-           timeval_compare(&now, &startup_update_due) >= 0) {
-            int have_neighbour = 0;
+        if(init_flow_pending) {
+            int have_valid_neigh = 0;
 
             FOR_ALL_NEIGHBOURS(neigh) {
-                if(neigh->ifp && if_up(neigh->ifp)) {
-                    have_neighbour = 1;
+                if(neigh->ifp && if_up(neigh->ifp) &&
+                   neigh->hello.reach != 0) {
+                    have_valid_neigh = 1;
                     break;
                 }
             }
 
-            if(have_neighbour) {
-                FOR_ALL_INTERFACES(ifp) {
-                    if(!if_up(ifp))
-                        continue;
-                    send_self_update(ifp);
-                    flushupdates(ifp);
-                    flushbuf(&ifp->buf, ifp);
-                }
-                startup_update_pending = 0;
-                startup_update_due.tv_sec = 0;
-                startup_update_due.tv_usec = 0;
-            } else {
-                timeval_add_msec(&startup_update_due, &now, 10000);
+            /* Fire when a neighbour completes hello exchange (reach != 0),
+               meaning auth/challenge is done.  Fall back after 60s so we
+               don't wait forever if no neighbour ever authenticates. */
+            if(have_valid_neigh ||
+               timeval_compare(&now, &init_flow_due) >= 0) {
+                debugf("init_flow: firing (valid_neigh=%d, deadline=%s)\n",
+                       have_valid_neigh,
+                       have_valid_neigh ? "no" : "yes");
+                init_flow();
+                init_flow_pending = 0;
+                init_flow_due.tv_sec = 0;
+                init_flow_due.tv_usec = 0;
             }
         }
 
