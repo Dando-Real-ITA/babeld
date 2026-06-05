@@ -960,6 +960,7 @@ void kernel_delete_retracted_route_clears_installed_state_test(void)
     kroute.src_plen = route->src->src_plen;
     kroute.table = 0;
     kroute.proto = RTPROT_BABEL;
+    kroute.metric = KERNEL_INFINITY;
 
     kernel_route_notify(0, &kroute, NULL);
 
@@ -970,6 +971,70 @@ void kernel_delete_retracted_route_clears_installed_state_test(void)
         fprintf(stderr,
                 "Expected route to be uninstalled after kernel delete notification; installed=%d tables=%d.\n",
                 route->installed, route->installed_table_count);
+    }
+}
+
+void kernel_delete_old_reachable_state_during_retraction_is_ignored_test(void)
+{
+    int i;
+    struct babel_route *route = NULL;
+    struct kernel_route kroute;
+    int current_metric;
+
+    for(i = 0; i < route_slots; i++) {
+        struct babel_route *r = routes[i];
+        while(r) {
+            if(r->neigh == ns[1]) {
+                route = r;
+                break;
+            }
+            r = r->next;
+        }
+        if(route)
+            break;
+    }
+
+    if(!babel_check(route != NULL)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on kernel_delete_old_reachable_state_during_retraction_is_ignored_test setup (missing route).\n");
+        return;
+    }
+
+    retract_neighbour_routes(ns[1]);
+
+    if(!route->installed)
+        install_route(route);
+
+    current_metric = metric_to_kernel(route_metric(route));
+    if(!babel_check(route->installed && route->installed_table_count > 0 &&
+                    current_metric == KERNEL_INFINITY)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on kernel_delete_old_reachable_state_during_retraction_is_ignored_test setup (route not retracted/installed).\n");
+        return;
+    }
+
+    memset(&kroute, 0, sizeof(kroute));
+    memcpy(kroute.prefix, route->src->prefix, 16);
+    kroute.plen = route->src->plen;
+    memcpy(kroute.src_prefix, route->src->src_prefix, 16);
+    kroute.src_plen = route->src->src_plen;
+    kroute.table = route->installed_tables[0];
+    kroute.proto = RTPROT_BABEL;
+    kroute.metric = kernel_metric;
+
+    kernel_route_notify(0, &kroute, NULL);
+
+    if(!babel_check(route->installed && route->installed_table_count > 0 &&
+                    metric_to_kernel(route_metric(route)) == KERNEL_INFINITY)) {
+        fprintf(stderr, "-----------------------------------------------\n");
+        fprintf(stderr,
+                "Failed test on kernel_delete_old_reachable_state_during_retraction_is_ignored_test.\n");
+        fprintf(stderr,
+                "Expected stale reachable delete notify to be ignored while route stays installed/unreachable; installed=%d tables=%d metric=%d.\n",
+                route->installed, route->installed_table_count,
+                route_metric(route));
     }
 }
 
@@ -3029,6 +3094,8 @@ void route_test_suite(void)
              "flush_xroute_reannounces_more_specific_test");
     run_route_test(kernel_delete_retracted_route_clears_installed_state_test,
                    "kernel_delete_retracted_route_clears_installed_state_test");
+    run_route_test(kernel_delete_old_reachable_state_during_retraction_is_ignored_test,
+                   "kernel_delete_old_reachable_state_during_retraction_is_ignored_test");
     run_route_test(explicit_retraction_uninstalls_route_test,
                    "explicit_retraction_uninstalls_route_test");
     run_route_test(explicit_retraction_without_tlv_keeps_installed_test,

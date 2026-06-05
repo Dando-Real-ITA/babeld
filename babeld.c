@@ -94,6 +94,8 @@ static int kernel_addr_changed = 0;
 static int kernel_event_coalesce_msec = 500;
 static struct timeval kernel_link_change_due = {0, 0};
 static struct timeval kernel_addr_change_due = {0, 0};
+static struct timeval startup_update_due = {0, 0};
+static int startup_update_pending = 0;
 int kernel_check_interval = 300;
 int shutdown_delay_msec = -1;
 
@@ -624,6 +626,8 @@ babel_main(char **interface_names, int num_interface_names)
     schedule_interfaces_check(30000, 1);
     expiry_time = now.tv_sec + roughly(30);
     source_expiry_time = now.tv_sec + roughly(300);
+    timeval_add_msec(&startup_update_due, &now, 10000);
+    startup_update_pending = 1;
 
     if(delay_init_flow) {
         /* Send hellos to trigger challenge start */
@@ -662,6 +666,8 @@ babel_main(char **interface_names, int num_interface_names)
         timeval_min_sec(&tv, source_expiry_time);
         if(kernel_check_interval > 0)
             timeval_min_sec(&tv, kernel_dump_time);
+        if(startup_update_pending)
+            timeval_min(&tv, &startup_update_due);
         timeval_min(&tv, &resend_time);
         FOR_ALL_INTERFACES(ifp) {
             if(!if_up(ifp))
@@ -849,6 +855,33 @@ babel_main(char **interface_names, int num_interface_names)
         if(now.tv_sec >= source_expiry_time) {
             expire_sources();
             source_expiry_time = now.tv_sec + roughly(300);
+        }
+
+        if(startup_update_pending &&
+           timeval_compare(&now, &startup_update_due) >= 0) {
+            int have_neighbour = 0;
+
+            FOR_ALL_NEIGHBOURS(neigh) {
+                if(neigh->ifp && if_up(neigh->ifp)) {
+                    have_neighbour = 1;
+                    break;
+                }
+            }
+
+            if(have_neighbour) {
+                FOR_ALL_INTERFACES(ifp) {
+                    if(!if_up(ifp))
+                        continue;
+                    send_self_update(ifp);
+                    flushupdates(ifp);
+                    flushbuf(&ifp->buf, ifp);
+                }
+                startup_update_pending = 0;
+                startup_update_due.tv_sec = 0;
+                startup_update_due.tv_usec = 0;
+            } else {
+                timeval_add_msec(&startup_update_due, &now, 10000);
+            }
         }
 
         FOR_ALL_INTERFACES(ifp) {

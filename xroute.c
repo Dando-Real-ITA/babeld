@@ -44,6 +44,89 @@ THE SOFTWARE.
 static struct xroute *xroutes;
 static int numxroutes = 0, maxxroutes = 0;
 
+#define SELF_DELETE_SUPPRESS_MAX 8192
+#define SELF_DELETE_SUPPRESS_SEC 5
+
+struct self_delete_suppress {
+    unsigned char prefix[16];
+    unsigned char plen;
+    unsigned char src_prefix[16];
+    unsigned char src_plen;
+    int table;
+    int metric;
+    struct timeval time;
+    unsigned char used;
+};
+
+static struct self_delete_suppress self_delete_suppressions[SELF_DELETE_SUPPRESS_MAX];
+static int self_delete_suppress_cursor = 0;
+
+static int
+normalise_table(int table)
+{
+    return table == 0 ? 254 : table;
+}
+
+void
+note_self_kernel_route_delete(const unsigned char *prefix,
+                              unsigned char plen,
+                              const unsigned char *src_prefix,
+                              unsigned char src_plen,
+                              int proto,
+                              int table,
+                              int metric)
+{
+    struct self_delete_suppress *entry;
+
+    if(proto != RTPROT_BABEL)
+        return;
+
+    entry = &self_delete_suppressions[
+        self_delete_suppress_cursor++ % SELF_DELETE_SUPPRESS_MAX];
+
+    memcpy(entry->prefix, prefix, 16);
+    entry->plen = plen;
+    memcpy(entry->src_prefix, src_prefix, 16);
+    entry->src_plen = src_plen;
+    entry->table = normalise_table(table);
+    entry->metric = metric;
+    gettimeofday(&entry->time, NULL);
+    entry->used = 1;
+}
+
+static int
+consume_self_kernel_route_delete(const struct kernel_route *kroute)
+{
+    struct timeval tv;
+    int i;
+
+    gettimeofday(&tv, NULL);
+
+    for(i = 0; i < SELF_DELETE_SUPPRESS_MAX; i++) {
+        struct self_delete_suppress *entry = &self_delete_suppressions[i];
+
+        if(!entry->used)
+            continue;
+
+        if(tv.tv_sec > entry->time.tv_sec + SELF_DELETE_SUPPRESS_SEC) {
+            entry->used = 0;
+            continue;
+        }
+
+        if(entry->table == normalise_table(kroute->table) &&
+           entry->metric == kroute->metric &&
+           entry->plen == kroute->plen &&
+           entry->src_plen == kroute->src_plen &&
+           memcmp(entry->prefix, kroute->prefix, 16) == 0 &&
+           memcmp(entry->src_prefix, kroute->src_prefix, 16) == 0) {
+            entry->used = 0;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 int
 format_xroute_metrics(const struct xroute *xroute, char *buf, int len)
 {
@@ -106,12 +189,6 @@ send_covered_xroute_updates(const unsigned char *prefix, unsigned char plen,
         send_update(NULL, 0, xroutes[i].prefix, xroutes[i].plen,
                     xroutes[i].src_prefix, xroutes[i].src_plen);
     }
-}
-
-static int
-normalise_table(int table)
-{
-    return table == 0 ? 254 : table;
 }
 
 static int
@@ -631,6 +708,22 @@ sync_deleted_babel_route(struct kernel_route *kroute)
         matched = 1;
         before_count = route->installed_table_count;
 
+          /* A single Babel destination can transiently emit RTM_DELROUTE for an
+              older kernel-visible state while we are replacing it locally (for
+              example reachable -> unreachable hold-down).  Reconcile only when
+              the delete still matches the route's current kernel-visible metric;
+              otherwise we'd clear installed_table_count for the new state and
+              trigger pointless re-install loops. */
+          if(route->installed > 0 &&
+              kroute->metric >= 0 && kroute->metric <= KERNEL_INFINITY &&
+              metric_to_kernel(route_metric(route)) != kroute->metric) {
+                debugf("Babel delete reconcile: ignoring stale delete for %s (src_plen=%d, table=%d, kernel metric=%d current metric=%d).\n",
+                         format_prefix(kroute->prefix, kroute->plen),
+                         kroute->src_plen, kroute->table, kroute->metric,
+                         metric_to_kernel(route_metric(route)));
+                continue;
+          }
+
         if(!remove_installed_table(route, kroute->table)) {
             debugf("Babel delete reconcile: no matching installed table for %s (src_plen=%d, table=%d, current tables=%d).\n",
                    format_prefix(kroute->prefix, kroute->plen),
@@ -691,6 +784,17 @@ kernel_route_notify(int add, struct kernel_route *kroute, void *closure)
            kroute->src_plen, kroute->table);
 
     if(!add) {
+          /* Self-delete suppression is only for Babel-owned kernel routes.
+              Local/imported routes (for example RTPROT_BABEL_LOCAL xroutes)
+              must still be reconciled normally. */
+        if(kroute->proto == RTPROT_BABEL &&
+           consume_self_kernel_route_delete(kroute)) {
+            debugf("Ignoring self-generated Babel delete notify for %s (src_plen=%d, table=%d, metric=%d).\n",
+                   format_prefix(kroute->prefix, kroute->plen),
+                   kroute->src_plen, kroute->table, kroute->metric);
+            return;
+        }
+
         if(kroute->proto == RTPROT_BABEL &&
            !kernel_route_operation_in_progress()) {
             debugf("Reconciling external Babel delete notify for %s (src_plen=%d, table=%d).\n",
