@@ -633,7 +633,15 @@ parse_packet(const unsigned char *from, struct interface *ifp,
     }
 
     if(ifp->key != NULL) {
-        int rc = check_hmac(packet, packetlen, bodylen, from, to, ifp);
+        int rc;
+
+        /* Process challenge reply before checking HMAC: the peer's first
+           signed packet cannot pass HMAC until the challenge handshake
+           succeeds, so MESSAGE_CHALLENGE_REPLY must be handled
+           unconditionally to break the deadlock. */
+        neigh = preparse_packet(from, ifp, packet, bodylen, to);
+
+        rc = check_hmac(packet, packetlen, bodylen, from, to, ifp);
         if(rc <= 0) {
             if(rc < 0)
                 debugf("Received unsigned packet.\n");
@@ -641,8 +649,10 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                 debugf("Received packet with bad signature.\n");
             if(!(ifp->flags & IF_ACCEPT_BAD_SIGNATURES))
                 return;
+            /* HMAC failed but bad-signature mode is on; clear neigh so
+               the main loop falls through to find_neighbour. */
+            neigh = NULL;
         } else {
-            neigh = preparse_packet(from, ifp, packet, bodylen, to);
             if(neigh == NULL) {
                 debugf("PC check failed.\n");
                 return;
