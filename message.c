@@ -1868,7 +1868,7 @@ flushupdates(struct interface *ifp)
                                     b[i].src_prefix, b[i].src_plen,
                                     0, NULL);
 
-            if(xroute && (!route || xroute->metric <= kernel_metric)) {
+            if(xroute) {
                 really_send_update(ifp, myid,
                                    xroute->prefix, xroute->plen,
                                    xroute->src_prefix, xroute->src_plen,
@@ -2681,7 +2681,7 @@ handle_request(struct neighbour *neigh, const unsigned char *prefix,
 
     xroute = find_xroute(prefix, plen, src_prefix, src_plen);
     route = find_best_route(id, prefix, plen, src_prefix, src_plen, 0, NULL);
-    if(xroute && (!route || xroute->metric <= kernel_metric)) {
+    if(xroute) {
         if(hop_count > 0 && memcmp(id, myid, 8) == 0) {
             if(seqno_compare(seqno, myseqno) > 0) {
                 if(seqno_minus(seqno, myseqno) > 100) {
