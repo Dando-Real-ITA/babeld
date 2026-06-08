@@ -115,6 +115,7 @@ static void init_signals(void);
 static void dump_tables(FILE *out);
 static void init_hello();
 static void init_flow();
+static int reset_protocol_socket(void);
 
 static int
 dump_prefix_is_ipv4(const unsigned char *prefix, unsigned char plen)
@@ -185,6 +186,40 @@ kernel_link_notify(int add, struct kernel_link *link, void *closure)
             return;
         }
     }
+}
+
+static int
+reset_protocol_socket(void)
+{
+    struct interface *ifp;
+    struct ipv6_mreq mreq;
+    int s;
+
+    s = babel_socket(protocol_port);
+    if(s < 0)
+        return -1;
+
+    if(protocol_socket >= 0)
+        close(protocol_socket);
+    protocol_socket = s;
+
+    FOR_ALL_INTERFACES(ifp) {
+        if(!if_up(ifp) || ifp->ifindex <= 0)
+            continue;
+
+        memset(&mreq, 0, sizeof(mreq));
+        memcpy(&mreq.ipv6mr_multiaddr, protocol_group, 16);
+        mreq.ipv6mr_interface = ifp->ifindex;
+        if(setsockopt(protocol_socket, IPPROTO_IPV6, IPV6_JOIN_GROUP,
+                      (char*)&mreq, sizeof(mreq)) < 0) {
+            perror("setsockopt(IPV6_JOIN_GROUP)");
+        }
+
+        send_multicast_request(ifp, NULL, 0, NULL, 0);
+    }
+
+    debugf("Protocol socket reset after hard receive errors.\n");
+    return 0;
 }
 
 #ifndef NO_MAIN
@@ -483,6 +518,7 @@ babel_main(char **interface_names, int num_interface_names)
     struct sockaddr_in6 sin6;
     void *vrc;
     int i, fd, rc;
+    int protocol_recv_hard_errors = 0;
 
     rc = kernel_setup(1);
     if(rc < 0) {
@@ -733,9 +769,20 @@ babel_main(char **interface_names, int num_interface_names)
             if(rc < 0) {
                 if(errno != EAGAIN && errno != EINTR) {
                     perror("recv");
+                    if(errno == ENETDOWN || errno == ENODEV || errno == EBADF) {
+                        protocol_recv_hard_errors++;
+                        if(protocol_recv_hard_errors >= 3) {
+                            if(reset_protocol_socket() < 0)
+                                perror("reset_protocol_socket");
+                            protocol_recv_hard_errors = 0;
+                        }
+                    } else {
+                        protocol_recv_hard_errors = 0;
+                    }
                     sleep(1);
                 }
             } else {
+                protocol_recv_hard_errors = 0;
                 FOR_ALL_INTERFACES(ifp) {
                     if(!if_up(ifp))
                         continue;

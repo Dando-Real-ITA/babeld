@@ -568,7 +568,13 @@ check_interfaces(void)
         if(if_up(ifp)) {
             /* Bother, said Pooh.  We should probably check for a change
                in IPv4 addresses at this point. */
-            check_link_local_addresses(ifp);
+            rc = check_link_local_addresses(ifp);
+            if(rc < 0) {
+                debugf("Lost usable link-local addresses on %s, resetting interface.\n",
+                       ifp->name);
+                interface_updown(ifp, 0);
+                continue;
+            }
             rc = check_interface_ipv4(ifp);
             if(rc > 0) {
                 send_multicast_request(ifp, NULL, 0, NULL, 0);
