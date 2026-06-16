@@ -267,9 +267,9 @@ interface_updown(struct interface *ifp, int up)
         ifp->flags |= IF_UP;
         ifp->link_event_pending = 0;
 
-        /* Handle a pending coalesced link-down flush:
-           - Within 250ms (fast flap): cancel the timer, no route flush needed.
-           - Past 250ms (edge case: check_interfaces hasn't fired yet): flush
+          /* Handle a pending coalesced link-down flush:
+              - Within 1s (fast flap): cancel the timer, no route flush needed.
+              - Past 1s (edge case: check_interfaces hasn't fired yet): flush
              routes before re-upping so stale state is cleared. */
         if(ifp->route_flush_due.tv_sec != 0 || ifp->route_flush_due.tv_usec != 0) {
             if(timeval_compare(&now, &ifp->route_flush_due) >= 0) {
@@ -279,7 +279,7 @@ interface_updown(struct interface *ifp, int up)
                 flush_interface_routes(ifp, 0);
                 /* resync happens via force_reinstall_interface_routes below */
             } else {
-                debugf("Interface %s fast-flap within 250ms, skipping route "
+                  debugf("Interface %s fast-flap within 1s, skipping route "
                        "flush.\n", ifp->name);
             }
             ifp->route_flush_due.tv_sec = 0;
@@ -515,10 +515,10 @@ interface_updown(struct interface *ifp, int up)
         send_multicast_request(ifp, NULL, 0, NULL, 0);
     } else {
         ifp->flags &= ~IF_UP;
-        /* Coalesced link-down: defer route flush by 250ms so that a fast
+          /* Coalesced link-down: defer route flush by 1s so that a fast
            link flap (e.g. netplan apply) does not disrupt installed routes.
            The flush fires from check_interfaces if the link stays down. */
-        timeval_add_msec(&ifp->route_flush_due, &now, 250);
+          timeval_add_msec(&ifp->route_flush_due, &now, 1000);
         ifp->buf.len = 0;
         ifp->buf.size = 0;
         free(ifp->buf.buf);
@@ -643,7 +643,7 @@ check_interfaces(void)
             interface_updown(ifp, rc > 0);
         }
 
-        /* Deferred link-down route flush: execute once the 250ms coalesce
+        /* Deferred link-down route flush: execute once the 1s coalesce
            window has expired and the interface is still down. */
         if(!if_up(ifp) &&
            (ifp->route_flush_due.tv_sec != 0 || ifp->route_flush_due.tv_usec != 0) &&
