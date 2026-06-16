@@ -257,8 +257,12 @@ int
 interface_updown(struct interface *ifp, int up)
 {
     int mtu, rc, type;
+    int coalesced_recovery = 0;
+    int flap_coalesce_msec;
     struct ipv6_mreq mreq;
     int v4viav6;
+
+    flap_coalesce_msec = ifp->hello_interval > 0 ? ifp->hello_interval : 1000;
 
     if((!!up) == if_up(ifp))
         return 0;
@@ -267,9 +271,10 @@ interface_updown(struct interface *ifp, int up)
         ifp->flags |= IF_UP;
         ifp->link_event_pending = 0;
 
-          /* Handle a pending coalesced link-down flush:
-              - Within 1s (fast flap): cancel the timer, no route flush needed.
-              - Past 1s (edge case: check_interfaces hasn't fired yet): flush
+        /* Handle a pending coalesced link-down flush:
+           - Within hello_interval (fast flap): cancel the timer.
+           - Past hello_interval (edge case: check_interfaces hasn't fired
+             yet): flush
              routes before re-upping so stale state is cleared. */
         if(ifp->route_flush_due.tv_sec != 0 || ifp->route_flush_due.tv_usec != 0) {
             if(timeval_compare(&now, &ifp->route_flush_due) >= 0) {
@@ -277,11 +282,12 @@ interface_updown(struct interface *ifp, int up)
                        "flushing routes first.\n", ifp->name);
                 route_mark_interface_routes_for_resync(ifp);
                 flush_interface_routes(ifp, 0);
-                /* resync happens via force_reinstall_interface_routes below */
             } else {
-                  debugf("Interface %s fast-flap within 1s, skipping route "
-                       "flush.\n", ifp->name);
+                debugf("Interface %s fast-flap within hello_interval "
+                       "(%dms), skipping route flush.\n",
+                       ifp->name, flap_coalesce_msec);
             }
+            coalesced_recovery = 1;
             ifp->route_flush_due.tv_sec = 0;
             ifp->route_flush_due.tv_usec = 0;
         }
@@ -505,20 +511,26 @@ interface_updown(struct interface *ifp, int up)
 
         set_timeout(&ifp->hello_timeout, ifp->hello_interval);
         set_timeout(&ifp->update_timeout, ifp->update_interval);
-        /* Re-verify and reinstall routes that may have been lost during the
-           link event (kernel silently drops routes on link-down without
-           sending RTM_DELROUTE, or sync_deleted_babel_route cleared them). */
-        force_reinstall_interface_routes(ifp);
+          if(coalesced_recovery) {
+                /* Reconsider all route choices for this interface after a
+                    coalesced flap so every affected prefix is re-evaluated. */
+                route_resync_marked_routes();
+          } else {
+                /* Re-verify and reinstall routes that may have been lost during the
+                    link event (kernel silently drops routes on link-down without
+                    sending RTM_DELROUTE, or sync_deleted_babel_route cleared them). */
+                force_reinstall_interface_routes(ifp);
+          }
         send_hello(ifp);
         if(rc > 0)
             send_update(ifp, 0, NULL, 0, NULL, 0);
         send_multicast_request(ifp, NULL, 0, NULL, 0);
     } else {
         ifp->flags &= ~IF_UP;
-          /* Coalesced link-down: defer route flush by 1s so that a fast
+          /* Coalesced link-down: defer route flush by hello_interval so that a fast
            link flap (e.g. netplan apply) does not disrupt installed routes.
            The flush fires from check_interfaces if the link stays down. */
-          timeval_add_msec(&ifp->route_flush_due, &now, 1000);
+          timeval_add_msec(&ifp->route_flush_due, &now, flap_coalesce_msec);
         ifp->buf.len = 0;
         ifp->buf.size = 0;
         free(ifp->buf.buf);
@@ -643,7 +655,7 @@ check_interfaces(void)
             interface_updown(ifp, rc > 0);
         }
 
-        /* Deferred link-down route flush: execute once the 1s coalesce
+        /* Deferred link-down route flush: execute once the hello_interval coalesce
            window has expired and the interface is still down. */
         if(!if_up(ifp) &&
            (ifp->route_flush_due.tv_sec != 0 || ifp->route_flush_due.tv_usec != 0) &&
@@ -657,15 +669,16 @@ check_interfaces(void)
             ifp->route_flush_due.tv_usec = 0;
         }
 
-        /* Fast-flap recovery: interface had a link event but appears
+         /* Fast-flap recovery: interface had a link event but appears
            continuously up to babeld (both down+up within the kernel event
            coalesce window).  Kernel drops routes silently on link-down
-           without RTM_DELROUTE, so force-reinstall them now. */
+            without RTM_DELROUTE, so resync all affected prefixes now. */
         if(if_up(ifp) && ifp->link_event_pending) {
-            debugf("Link event on up interface %s, "
-                   "force-reinstalling routes.\n", ifp->name);
+             debugf("Link event on up interface %s, resyncing routes.\n",
+                 ifp->name);
             ifp->link_event_pending = 0;
-            force_reinstall_interface_routes(ifp);
+             route_mark_interface_routes_for_resync(ifp);
+             route_resync_marked_routes();
         }
 
         if(if_up(ifp)) {
