@@ -151,6 +151,12 @@ struct interface {
     struct key *key;
     unsigned int pc;
     unsigned char index[INDEX_LEN];
+    /* Link-flap coalescing: routes are not flushed immediately on link-down;
+       this deadline is when the flush fires if the link is still down. */
+    struct timeval route_flush_due;
+    /* Set by kernel_link_notify when a link event arrives while the
+       interface appears continuously up (fast flap invisible to updown). */
+    unsigned char link_event_pending;
 };
 
 #define IF_CONF(_ifp, _field) \

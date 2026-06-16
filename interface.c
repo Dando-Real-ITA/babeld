@@ -47,6 +47,8 @@ THE SOFTWARE.
 
 #define MIN_MTU 512
 
+static void force_reinstall_interface_routes(struct interface *ifp);
+
 struct interface *interfaces = NULL;
 
 static struct interface *
@@ -263,6 +265,27 @@ interface_updown(struct interface *ifp, int up)
 
     if(up) {
         ifp->flags |= IF_UP;
+        ifp->link_event_pending = 0;
+
+        /* Handle a pending coalesced link-down flush:
+           - Within 250ms (fast flap): cancel the timer, no route flush needed.
+           - Past 250ms (edge case: check_interfaces hasn't fired yet): flush
+             routes before re-upping so stale state is cleared. */
+        if(ifp->route_flush_due.tv_sec != 0 || ifp->route_flush_due.tv_usec != 0) {
+            if(timeval_compare(&now, &ifp->route_flush_due) >= 0) {
+                debugf("Interface %s back up after coalesce window expired, "
+                       "flushing routes first.\n", ifp->name);
+                route_mark_interface_routes_for_resync(ifp);
+                flush_interface_routes(ifp, 0);
+                /* resync happens via force_reinstall_interface_routes below */
+            } else {
+                debugf("Interface %s fast-flap within 250ms, skipping route "
+                       "flush.\n", ifp->name);
+            }
+            ifp->route_flush_due.tv_sec = 0;
+            ifp->route_flush_due.tv_usec = 0;
+        }
+
         if(ifp->ifindex <= 0) {
             fprintf(stderr,
                     "Upping unknown interface %s.\n", ifp->name);
@@ -482,15 +505,20 @@ interface_updown(struct interface *ifp, int up)
 
         set_timeout(&ifp->hello_timeout, ifp->hello_interval);
         set_timeout(&ifp->update_timeout, ifp->update_interval);
+        /* Re-verify and reinstall routes that may have been lost during the
+           link event (kernel silently drops routes on link-down without
+           sending RTM_DELROUTE, or sync_deleted_babel_route cleared them). */
+        force_reinstall_interface_routes(ifp);
         send_hello(ifp);
         if(rc > 0)
             send_update(ifp, 0, NULL, 0, NULL, 0);
         send_multicast_request(ifp, NULL, 0, NULL, 0);
     } else {
         ifp->flags &= ~IF_UP;
-        route_mark_interface_routes_for_resync(ifp);
-        flush_interface_routes(ifp, 0);
-        route_resync_marked_routes();
+        /* Coalesced link-down: defer route flush by 250ms so that a fast
+           link flap (e.g. netplan apply) does not disrupt installed routes.
+           The flush fires from check_interfaces if the link stays down. */
+        timeval_add_msec(&ifp->route_flush_due, &now, 250);
         ifp->buf.len = 0;
         ifp->buf.size = 0;
         free(ifp->buf.buf);
@@ -542,6 +570,54 @@ interface_ll_address(struct interface *ifp, const unsigned char *address)
     return 0;
 }
 
+/* For each route through ifp that is currently marked as installed (or that
+   was cleared by sync_deleted_babel_route during a link flap), attempt to
+   re-add it to the kernel.  Called after a fast link-flap recovery so the
+   kernel route table is brought back in sync without a full protocol reset.
+   Memory safety: we save neigh_route_next before any call because none of
+   uninstall_route / change_route / consider_route reach flush_route or
+   destroy_route, so r and next are never freed during the iteration.
+   ECMP note: uninstall_route clears installed on all group members; a later
+   iteration over a sibling route may find installed==0 and hit the else-if
+   branch — that is harmless (consider_route is idempotent). */
+static void
+force_reinstall_interface_routes(struct interface *ifp)
+{
+    struct neighbour *neigh;
+    FOR_ALL_NEIGHBOURS(neigh) {
+        struct babel_route *r;
+        if(neigh->ifp != ifp)
+            continue;
+        r = neigh->routes;
+        while(r) {
+            struct babel_route *next = r->neigh_route_next;
+            if(r->installed > 0) {
+                /* Route is marked installed but kernel may have dropped it
+                   silently when the link went down.  Re-add; if it was already
+                   there the kernel returns EEXIST which we treat as success. */
+                int rc = change_route(ROUTE_ADD, r,
+                                      metric_to_kernel(route_metric(r)),
+                                      NULL, 0, 0, NULL,
+                                      r->installed_tables,
+                                      &r->installed_table_count);
+                if(rc < 0 && errno != EEXIST) {
+                    debugf("force_reinstall: re-add failed, reconsidering route "
+                           "via %s.\n", format_address(r->nexthop));
+                    uninstall_route(r);
+                    consider_route(r);
+                }
+            } else if(r->time >= now.tv_sec - (time_t)r->hold_time &&
+                      route_feasible(r) &&
+                      route_metric(r) < INFINITY) {
+                /* Route was cleared (e.g. by sync_deleted_babel_route during
+                   a fast flap) — try to reinstall via normal selection. */
+                consider_route(r);
+            }
+            r = next;
+        }
+    }
+}
+
 void
 check_interfaces(void)
 {
@@ -565,6 +641,31 @@ check_interfaces(void)
         if((rc > 0) != if_up(ifp)) {
             debugf("Noticed status change for %s.\n", ifp->name);
             interface_updown(ifp, rc > 0);
+        }
+
+        /* Deferred link-down route flush: execute once the 250ms coalesce
+           window has expired and the interface is still down. */
+        if(!if_up(ifp) &&
+           (ifp->route_flush_due.tv_sec != 0 || ifp->route_flush_due.tv_usec != 0) &&
+           timeval_compare(&now, &ifp->route_flush_due) >= 0) {
+            debugf("Coalesced route flush firing for down interface %s.\n",
+                   ifp->name);
+            route_mark_interface_routes_for_resync(ifp);
+            flush_interface_routes(ifp, 0);
+            route_resync_marked_routes();
+            ifp->route_flush_due.tv_sec = 0;
+            ifp->route_flush_due.tv_usec = 0;
+        }
+
+        /* Fast-flap recovery: interface had a link event but appears
+           continuously up to babeld (both down+up within the kernel event
+           coalesce window).  Kernel drops routes silently on link-down
+           without RTM_DELROUTE, so force-reinstall them now. */
+        if(if_up(ifp) && ifp->link_event_pending) {
+            debugf("Link event on up interface %s, "
+                   "force-reinstalling routes.\n", ifp->name);
+            ifp->link_event_pending = 0;
+            force_reinstall_interface_routes(ifp);
         }
 
         if(if_up(ifp)) {

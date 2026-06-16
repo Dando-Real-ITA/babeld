@@ -183,6 +183,7 @@ kernel_link_notify(int add, struct kernel_link *link, void *closure)
     FOR_ALL_INTERFACES(ifp) {
         if(strcmp(ifp->name, link->ifname) == 0) {
             kernel_link_changed = 1;
+            ifp->link_event_pending = 1;
             return;
         }
     }
@@ -708,6 +709,11 @@ babel_main(char **interface_names, int num_interface_names)
             timeval_min(&tv, &ifp->hello_timeout);
             timeval_min(&tv, &ifp->update_timeout);
             timeval_min(&tv, &ifp->update_flush_timeout);
+        }
+        /* Include deferred link-down route flush deadlines */
+        FOR_ALL_INTERFACES(ifp) {
+            if(ifp->route_flush_due.tv_sec != 0 || ifp->route_flush_due.tv_usec != 0)
+                timeval_min(&tv, &ifp->route_flush_due);
         }
         FOR_ALL_NEIGHBOURS(neigh) {
             timeval_min(&tv, &neigh->buf.timeout);
