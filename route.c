@@ -128,6 +128,28 @@ static void refresh_installed_ranks_ext(struct babel_route *route,
                                         int force_reprogram);
 static int route_expired(struct babel_route *route);
 static unsigned int route_ifindex_or_zero(const struct babel_route *route);
+static void clear_installed_ranks(const struct babel_route *route,
+                                  int clear_tables);
+
+static int
+retryable_kernel_add_errno(int err)
+{
+    return err == ENETDOWN || err == ENODEV || err == EINTR ||
+           err == EAGAIN || err == ENOBUFS || err == EBUSY;
+}
+
+static int
+allow_reconsider_retry_now(void)
+{
+    static struct timeval retry_not_before = {0, 0};
+
+    if((retry_not_before.tv_sec != 0 || retry_not_before.tv_usec != 0) &&
+       timeval_compare(&now, &retry_not_before) < 0)
+        return 0;
+
+    timeval_add_msec(&retry_not_before, &now, 250);
+    return 1;
+}
 
 static void
 schedule_route_metric_coalesce(struct babel_route *route)
@@ -307,8 +329,17 @@ route_flush_coalesced_metric_updates(void)
                                   NULL, 0, 0, NULL,
                                   r->installed_tables,
                                   &r->installed_table_count);
-                if(rc < 0 && errno != EEXIST)
+                if(rc < 0 && errno != EEXIST) {
+                          int saved_errno = errno;
                     perror("kernel_route(ADD coalesced)");
+                    /* FLUSH succeeded but re-ADD failed: keep local state
+                       aligned with kernel so we can retry via normal logic. */
+                    clear_installed_ranks(r, 1);
+                    local_notify_route(r, LOCAL_CHANGE);
+                          if(retryable_kernel_add_errno(saved_errno) &&
+                              allow_reconsider_retry_now())
+                                consider_route(r);
+                }
 
                 r->metric_update_pending = 0;
                 r->metric_update_started.tv_sec = 0;
@@ -1985,8 +2016,17 @@ update_kernel_if_needed:
                               NULL,
                               primary->installed_tables,
                               &primary->installed_table_count);
-            if(rc < 0 && errno != EEXIST)
+            if(rc < 0 && errno != EEXIST) {
+                     int saved_errno = errno;
                 perror("kernel_route(ADD ecmp refresh)");
+                /* FLUSH succeeded but ECMP re-ADD failed: clear stale
+                   installed marks and let normal selection retry. */
+                clear_installed_ranks(primary, 1);
+                local_notify_route(primary, LOCAL_CHANGE);
+                     if(retryable_kernel_add_errno(saved_errno) &&
+                         allow_reconsider_retry_now())
+                          consider_route(primary);
+            }
 
             /* Propagate the installed table list to all secondary ECMP members.
                They all share the same kernel multipath entry so they must
