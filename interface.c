@@ -488,7 +488,9 @@ interface_updown(struct interface *ifp, int up)
         send_multicast_request(ifp, NULL, 0, NULL, 0);
     } else {
         ifp->flags &= ~IF_UP;
+        route_mark_interface_routes_for_resync(ifp);
         flush_interface_routes(ifp, 0);
+        route_resync_marked_routes();
         ifp->buf.len = 0;
         ifp->buf.size = 0;
         free(ifp->buf.buf);

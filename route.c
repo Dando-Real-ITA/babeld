@@ -1244,6 +1244,165 @@ flush_interface_routes(struct interface *ifp, int v4only)
     }
 }
 
+struct marked_route_key {
+    unsigned char id[8];
+    unsigned char prefix[16];
+    unsigned char plen;
+    unsigned char src_prefix[16];
+    unsigned char src_plen;
+};
+
+static struct marked_route_key *marked_route_keys = NULL;
+static int marked_route_key_count = 0;
+static int marked_route_key_capacity = 0;
+
+static void
+clear_marked_route_keys(void)
+{
+    free(marked_route_keys);
+    marked_route_keys = NULL;
+    marked_route_key_count = 0;
+    marked_route_key_capacity = 0;
+}
+
+static int
+same_marked_route_key(const struct marked_route_key *a,
+                      const struct babel_route *r)
+{
+    return memcmp(a->id, r->src->id, 8) == 0 &&
+           memcmp(a->prefix, r->src->prefix, 16) == 0 &&
+           a->plen == r->src->plen &&
+           memcmp(a->src_prefix, r->src->src_prefix, 16) == 0 &&
+           a->src_plen == r->src->src_plen;
+}
+
+static int
+append_marked_route_key(const struct babel_route *r)
+{
+    int i;
+    struct marked_route_key *k;
+
+    for(i = 0; i < marked_route_key_count; i++) {
+        if(same_marked_route_key(&marked_route_keys[i], r))
+            return 1;
+    }
+
+    if(marked_route_key_count >= marked_route_key_capacity) {
+        int new_capacity = marked_route_key_capacity < 32 ? 32 :
+                           marked_route_key_capacity * 2;
+        struct marked_route_key *new_keys =
+            realloc(marked_route_keys,
+                    new_capacity * sizeof(struct marked_route_key));
+        if(new_keys == NULL)
+            return 0;
+        marked_route_keys = new_keys;
+        marked_route_key_capacity = new_capacity;
+    }
+
+    k = &marked_route_keys[marked_route_key_count++];
+    memcpy(k->id, r->src->id, 8);
+    memcpy(k->prefix, r->src->prefix, 16);
+    k->plen = r->src->plen;
+    memcpy(k->src_prefix, r->src->src_prefix, 16);
+    k->src_plen = r->src->src_plen;
+
+    return 1;
+}
+
+void
+route_mark_interface_routes_for_resync(struct interface *ifp)
+{
+    struct neighbour *neigh;
+
+    clear_marked_route_keys();
+
+    FOR_ALL_NEIGHBOURS(neigh) {
+        struct babel_route *r;
+
+        if(neigh->ifp != ifp)
+            continue;
+
+        r = neigh->routes;
+        while(r) {
+            if(!append_marked_route_key(r)) {
+                perror("realloc(marked_route_keys)");
+                clear_marked_route_keys();
+                return;
+            }
+            r = r->neigh_route_next;
+        }
+    }
+}
+
+void
+route_resync_marked_routes(void)
+{
+    int i;
+
+    if(marked_route_key_count == 0)
+        return;
+
+    for(i = 0; i < marked_route_key_count; i++) {
+        struct marked_route_key *k = &marked_route_keys[i];
+        int slot = find_route_slot(k->id,
+                                   k->prefix, k->plen,
+                                   k->src_prefix, k->src_plen,
+                                   NULL);
+        struct babel_route *head;
+        struct babel_route **snapshot = NULL;
+        int count = 0;
+        int n = 0;
+
+        if(slot < 0)
+            continue;
+
+        head = routes[slot];
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(r->installed != 0 || r->installed_table_count != 0) {
+                    r->installed = 0;
+                    r->installed_table_count = 0;
+                    cancel_coalesce_pending(r);
+                    local_notify_route(r, LOCAL_CHANGE);
+                }
+                count++;
+                r = r->multipath;
+            }
+            head = head->next;
+        }
+
+        if(count <= 0)
+            continue;
+
+        snapshot = calloc(count, sizeof(struct babel_route*));
+        if(snapshot == NULL) {
+            perror("calloc(route_resync_snapshot)");
+            continue;
+        }
+
+        head = routes[slot];
+        while(head) {
+            struct babel_route *r = head;
+            while(r) {
+                if(n < count)
+                    snapshot[n++] = r;
+                r = r->multipath;
+            }
+            head = head->next;
+        }
+
+        for(n = 0; n < count; n++) {
+            if(snapshot[n])
+                consider_route(snapshot[n]);
+        }
+
+        free(snapshot);
+    }
+
+    clear_marked_route_keys();
+}
+
 struct route_stream {
     int installed;
     int index;
