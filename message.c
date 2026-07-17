@@ -51,6 +51,125 @@ unsigned short myseqno = 0;
 struct timeval seqno_time = {0, 0};
 
 #define MAX_CHANNEL_HOPS 20
+#define XROUTE_FULL_ENTRY_INVALID_PLEN 255
+
+static void
+really_send_update(struct interface *ifp, const unsigned char *id,
+                   const unsigned char *prefix, unsigned char plen,
+                   const unsigned char *src_prefix, unsigned char src_plen,
+                   unsigned short seqno, unsigned short metric,
+                   unsigned char update_flags);
+
+static int
+same_xroute_full_key(const struct xroute_full_update_entry *entry,
+                     const unsigned char *prefix, unsigned char plen,
+                     const unsigned char *src_prefix, unsigned char src_plen)
+{
+    return entry->plen == plen &&
+           entry->src_plen == src_plen &&
+           memcmp(entry->prefix, prefix, 16) == 0 &&
+           memcmp(entry->src_prefix, src_prefix, 16) == 0;
+}
+
+void
+clear_xroute_full_updates(struct interface *ifp)
+{
+    if(ifp == NULL) {
+        struct interface *ifp_aux;
+        FOR_ALL_INTERFACES(ifp_aux)
+            clear_xroute_full_updates(ifp_aux);
+        return;
+    }
+
+    free(ifp->xroute_full_entries);
+    ifp->xroute_full_entries = NULL;
+    ifp->xroute_full_entries_len = 0;
+    ifp->xroute_full_entries_offset = 0;
+    ifp->xroute_full_entries_pending = 0;
+    ifp->xroute_full_chunk_timeout.tv_sec = 0;
+    ifp->xroute_full_chunk_timeout.tv_usec = 0;
+}
+
+void
+forget_xroute_full_update(const unsigned char *prefix, unsigned char plen,
+                          const unsigned char *src_prefix,
+                          unsigned char src_plen)
+{
+    struct interface *ifp;
+
+    FOR_ALL_INTERFACES(ifp) {
+        int i;
+
+        if(ifp->xroute_full_entries == NULL ||
+           ifp->xroute_full_entries_pending <= 0)
+            continue;
+
+        for(i = ifp->xroute_full_entries_offset;
+            i < ifp->xroute_full_entries_len; i++) {
+            struct xroute_full_update_entry *entry = &ifp->xroute_full_entries[i];
+
+            if(entry->plen == XROUTE_FULL_ENTRY_INVALID_PLEN)
+                continue;
+
+            if(!same_xroute_full_key(entry, prefix, plen, src_prefix, src_plen))
+                continue;
+
+            entry->plen = XROUTE_FULL_ENTRY_INVALID_PLEN;
+            ifp->xroute_full_entries_pending--;
+            break;
+        }
+
+        if(ifp->xroute_full_entries_pending <= 0)
+            clear_xroute_full_updates(ifp);
+    }
+}
+
+void
+drain_xroute_full_updates(struct interface *ifp)
+{
+    if(ifp == NULL) {
+        struct interface *ifp_aux;
+        FOR_ALL_INTERFACES(ifp_aux)
+            drain_xroute_full_updates(ifp_aux);
+        return;
+    }
+
+    if(!if_up(ifp) || ifp->xroute_full_entries == NULL ||
+       ifp->xroute_full_entries_pending <= 0)
+        return;
+
+    if(ifp->xroute_full_chunk_timeout.tv_sec != 0 &&
+       timeval_compare(&now, &ifp->xroute_full_chunk_timeout) < 0)
+        return;
+
+    {
+        unsigned chunk_size = MAX(1, ifp->xroute_full_chunk_size);
+        unsigned sent = 0;
+
+        while(sent < chunk_size &&
+              ifp->xroute_full_entries_offset < ifp->xroute_full_entries_len) {
+            struct xroute_full_update_entry *entry =
+                &ifp->xroute_full_entries[ifp->xroute_full_entries_offset++];
+
+            if(entry->plen == XROUTE_FULL_ENTRY_INVALID_PLEN)
+                continue;
+
+            really_send_update(ifp, myid,
+                               entry->prefix, entry->plen,
+                               entry->src_prefix, entry->src_plen,
+                               myseqno, entry->metric, 0);
+            ifp->xroute_full_entries_pending--;
+            sent++;
+        }
+    }
+
+    if(ifp->xroute_full_entries_pending > 0) {
+        set_timeout(&ifp->xroute_full_chunk_timeout,
+                    ifp->xroute_full_chunk_cadence_ms);
+    } else {
+        clear_xroute_full_updates(ifp);
+    }
+}
 
 /* Checks whether an AE exists or must be silently ignored */
 static int
@@ -2297,15 +2416,78 @@ send_self_update(struct interface *ifp)
         return;
     }
 
+    if(ifp->xroute_full_entries_pending > 0) {
+        drain_xroute_full_updates(ifp);
+        return;
+    }
+
     debugf("Sending self update to %s.\n", ifp->name);
+
+    clear_xroute_full_updates(ifp);
+
     xroutes = xroute_stream();
     if(xroutes) {
+        struct xroute *last = NULL;
+        int count = 0;
+        int max_entries = MAX(xroutes_estimate(), 4);
+
+        ifp->xroute_full_entries = calloc(max_entries,
+                                          sizeof(struct xroute_full_update_entry));
+        if(ifp->xroute_full_entries == NULL) {
+            perror("calloc(xroute_full_entries)");
+            xroute_stream_done(xroutes);
+            return;
+        }
+
         while(1) {
             struct xroute *xroute = xroute_stream_next(xroutes);
-            if(xroute == NULL) break;
-            send_update(ifp, 0, xroute->prefix, xroute->plen,
-                        xroute->src_prefix, xroute->src_plen);
+            struct xroute_full_update_entry *entry;
+
+            if(xroute == NULL)
+                break;
+
+            if(last != NULL &&
+               last->plen == xroute->plen &&
+               last->src_plen == xroute->src_plen &&
+               memcmp(last->prefix, xroute->prefix, 16) == 0 &&
+               memcmp(last->src_prefix, xroute->src_prefix, 16) == 0)
+                continue;
+
+            if(count >= max_entries) {
+                int new_max = max_entries * 2;
+                struct xroute_full_update_entry *new_entries =
+                    realloc(ifp->xroute_full_entries,
+                            new_max * sizeof(struct xroute_full_update_entry));
+                if(new_entries == NULL) {
+                    perror("realloc(xroute_full_entries)");
+                    clear_xroute_full_updates(ifp);
+                    xroute_stream_done(xroutes);
+                    return;
+                }
+                ifp->xroute_full_entries = new_entries;
+                max_entries = new_max;
+            }
+
+            entry = &ifp->xroute_full_entries[count++];
+            memcpy(entry->prefix, xroute->prefix, 16);
+            memcpy(entry->src_prefix, xroute->src_prefix, 16);
+            entry->plen = xroute->plen;
+            entry->src_plen = xroute->src_plen;
+            entry->metric = xroute->metric;
+            last = xroute;
         }
+
+        ifp->xroute_full_entries_len = count;
+        ifp->xroute_full_entries_offset = 0;
+        ifp->xroute_full_entries_pending = count;
+        ifp->xroute_full_chunk_timeout.tv_sec = 0;
+        ifp->xroute_full_chunk_timeout.tv_usec = 0;
+
+        if(count > 0)
+            drain_xroute_full_updates(ifp);
+        else
+            clear_xroute_full_updates(ifp);
+
         xroute_stream_done(xroutes);
     } else {
         fprintf(stderr, "Couldn't allocate xroute stream.\n");
