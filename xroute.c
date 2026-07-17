@@ -415,6 +415,7 @@ flush_xroute_ext(struct xroute *xroute, int send_updates, int hard_withdraw)
     plen = xroute->plen;
     memcpy(src_prefix, xroute->src_prefix, 16);
     src_plen = xroute->src_plen;
+    forget_xroute_full_update(prefix, plen, src_prefix, src_plen);
 
     i = xroute - xroutes;
     assert(i >= 0 && i < numxroutes);
@@ -653,6 +654,8 @@ modify_xroute(int i, struct kernel_route *kroute, int update) {
         xroutes[i].metric = kroute->metric;
         xroutes[i].proto = kroute->proto;
         local_notify_xroute(&xroutes[i], LOCAL_CHANGE);
+        forget_xroute_full_update(xroutes[i].prefix, xroutes[i].plen,
+                                  xroutes[i].src_prefix, xroutes[i].src_plen);
         if(update)
             send_update(NULL, 0, xroutes[i].prefix, xroutes[i].plen,
                         xroutes[i].src_prefix, xroutes[i].src_plen);
@@ -863,6 +866,8 @@ kernel_route_notify(int add, struct kernel_route *kroute, void *closure)
         flush_duplicate_route(kroute);
         send_update(NULL, 0, kroute->prefix, kroute->plen,
                     kroute->src_prefix, kroute->src_plen);
+        forget_xroute_full_update(kroute->prefix, kroute->plen,
+                                  kroute->src_prefix, kroute->src_plen);
     }
 
 }
@@ -993,6 +998,9 @@ check_xroutes(int send_updates, int warn, int check_infinity)
                     if(send_updates)
                         send_update(NULL, 0, routes[i].prefix, routes[i].plen,
                                     routes[i].src_prefix, routes[i].src_plen);
+                    forget_xroute_full_update(routes[i].prefix, routes[i].plen,
+                                              routes[i].src_prefix,
+                                              routes[i].src_plen);
                     made_changes = 1;
                     break;  /* Restart the pass */
                 } else if(rc == -1) {

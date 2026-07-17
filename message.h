@@ -103,6 +103,11 @@ void send_update_with_id(struct interface *ifp,
 void update_myseqno(void);
 void send_wildcard_retraction(struct interface *ifp);
 void send_self_update(struct interface *ifp);
+void drain_xroute_full_updates(struct interface *ifp);
+void forget_xroute_full_update(const unsigned char *prefix, unsigned char plen,
+                               const unsigned char *src_prefix,
+                               unsigned char src_plen);
+void clear_xroute_full_updates(struct interface *ifp);
 void send_ihu(struct neighbour *neigh, struct interface *ifp);
 void send_marginal_ihu(struct interface *ifp);
 void send_multicast_request(struct interface *ifp,

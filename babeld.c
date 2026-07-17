@@ -709,6 +709,7 @@ babel_main(char **interface_names, int num_interface_names)
             timeval_min(&tv, &ifp->hello_timeout);
             timeval_min(&tv, &ifp->update_timeout);
             timeval_min(&tv, &ifp->update_flush_timeout);
+            timeval_min(&tv, &ifp->xroute_full_chunk_timeout);
         }
         /* Include deferred link-down route flush deadlines */
         FOR_ALL_INTERFACES(ifp) {
@@ -936,6 +937,8 @@ babel_main(char **interface_names, int num_interface_names)
                 send_update(ifp, 0, NULL, 0, NULL, 0);
             if(timeval_compare(&now, &ifp->update_flush_timeout) >= 0)
                 flushupdates(ifp);
+            if(timeval_compare(&now, &ifp->xroute_full_chunk_timeout) >= 0)
+                drain_xroute_full_updates(ifp);
         }
 
         if(resend_time.tv_sec != 0) {
