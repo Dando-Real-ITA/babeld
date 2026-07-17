@@ -29,6 +29,14 @@ struct buffered_update {
     unsigned char pad[2];
 };
 
+struct xroute_full_update_entry {
+    unsigned char prefix[16];
+    unsigned char src_prefix[16];
+    unsigned char plen;
+    unsigned char src_plen;
+    unsigned short metric;
+};
+
 #define IF_TYPE_DEFAULT 0
 #define IF_TYPE_WIRED 1
 #define IF_TYPE_WIRELESS 2
@@ -62,6 +70,8 @@ struct interface_conf {
     unsigned int rtt_min;
     unsigned int rtt_max;
     unsigned int max_rtt_penalty;
+    unsigned xroute_full_chunk_size;
+    unsigned xroute_full_chunk_cadence_ms;
     struct key *key;
     struct interface_conf *next;
 };
@@ -137,6 +147,13 @@ struct interface {
     struct buffered_update *buffered_updates;
     int num_buffered_updates;
     int update_bufsize;
+    struct xroute_full_update_entry *xroute_full_entries;
+    int xroute_full_entries_len;
+    int xroute_full_entries_offset;
+    int xroute_full_entries_pending;
+    struct timeval xroute_full_chunk_timeout;
+    unsigned xroute_full_chunk_size;
+    unsigned xroute_full_chunk_cadence_ms;
     time_t last_update_time;
     unsigned short hello_seqno;
     unsigned hello_interval;

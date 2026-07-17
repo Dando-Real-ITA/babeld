@@ -681,6 +681,18 @@ parse_anonymous_ifconf(int c, gnc_t gnc, void *closure,
             if(c < -1 || penalty <= 0 || penalty > 0xFFFF)
                 goto error;
             if_conf->max_rtt_penalty = penalty;
+        } else if(strcmp(token, "xroute-full-chunk-size") == 0) {
+            int chunk_size;
+            c = getint(c, &chunk_size, gnc, closure);
+            if(c < -1 || chunk_size <= 0 || chunk_size > 1000000)
+                goto error;
+            if_conf->xroute_full_chunk_size = chunk_size;
+        } else if(strcmp(token, "xroute-full-chunk-cadence-ms") == 0) {
+            int cadence_ms;
+            c = getint(c, &cadence_ms, gnc, closure);
+            if(c < -1 || cadence_ms <= 0 || cadence_ms > 600000)
+                goto error;
+            if_conf->xroute_full_chunk_cadence_ms = cadence_ms;
         } else if(strcmp(token, "key") == 0) {
             char *key_id;
             struct key *key;
@@ -929,6 +941,8 @@ merge_ifconf(struct interface_conf *dest,
     MERGE(rtt_min);
     MERGE(rtt_max);
     MERGE(max_rtt_penalty);
+    MERGE(xroute_full_chunk_size);
+    MERGE(xroute_full_chunk_cadence_ms);
     MERGE(v4viav6);
     MERGE(probe_mtu);
     MERGE(key);

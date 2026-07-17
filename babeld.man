@@ -418,6 +418,20 @@ to derive route hold times for entries learned from this router.
 Very large values may therefore significantly extend how long peers keep
 unreachable routes before flushing them.
 .TP
+.BI xroute\-full\-chunk\-size " count"
+Maximum number of exported xroutes to send per full-update chunk when
+draining a full self-update.  Lower values reduce CPU and burst load on
+both sender and receivers at bootstrap or after wildcard requests, at the
+cost of taking longer to complete a full refresh.  The default is
+.BR 1000 .
+.TP
+.BI xroute\-full\-chunk\-cadence\-ms " milliseconds"
+Delay between consecutive full-update chunks for exported xroutes.
+The first chunk is sent immediately, and subsequent chunks are paced by
+this interval.  The default is
+.BR 1000
+milliseconds.
+.TP
 .BR enable\-timestamps " {" true | false }
 Enable sending timestamps with each Hello and IHU message in order to
 compute RTT values.  The default is

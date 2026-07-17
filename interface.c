@@ -458,6 +458,13 @@ interface_updown(struct interface *ifp, int up)
         if(ifp->max_rtt_penalty == 0 && type == IF_TYPE_TUNNEL)
             ifp->max_rtt_penalty = 96;
 
+        ifp->xroute_full_chunk_size =
+            IF_CONF(ifp, xroute_full_chunk_size) > 0 ?
+            IF_CONF(ifp, xroute_full_chunk_size) : 1000;
+        ifp->xroute_full_chunk_cadence_ms =
+            IF_CONF(ifp, xroute_full_chunk_cadence_ms) > 0 ?
+            IF_CONF(ifp, xroute_full_chunk_cadence_ms) : 1000;
+
         if(IF_CONF(ifp, enable_timestamps) == CONFIG_YES)
             ifp->flags |= IF_TIMESTAMPS;
         else if(IF_CONF(ifp, enable_timestamps) == CONFIG_NO)
@@ -552,6 +559,14 @@ interface_updown(struct interface *ifp, int up)
         if(ifp->buffered_updates)
             free(ifp->buffered_updates);
         ifp->buffered_updates = NULL;
+        if(ifp->xroute_full_entries)
+            free(ifp->xroute_full_entries);
+        ifp->xroute_full_entries = NULL;
+        ifp->xroute_full_entries_len = 0;
+        ifp->xroute_full_entries_offset = 0;
+        ifp->xroute_full_entries_pending = 0;
+        ifp->xroute_full_chunk_timeout.tv_sec = 0;
+        ifp->xroute_full_chunk_timeout.tv_usec = 0;
         ifp->buf.buf = NULL;
         if(ifp->ifindex > 0) {
             memset(&mreq, 0, sizeof(mreq));
