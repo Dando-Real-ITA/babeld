@@ -937,7 +937,8 @@ babel_main(char **interface_names, int num_interface_names)
                 send_update(ifp, 0, NULL, 0, NULL, 0);
             if(timeval_compare(&now, &ifp->update_flush_timeout) >= 0)
                 flushupdates(ifp);
-            if(timeval_compare(&now, &ifp->xroute_full_chunk_timeout) >= 0)
+            if(ifp->xroute_full_chunk_timeout.tv_sec != 0 &&
+               timeval_compare(&now, &ifp->xroute_full_chunk_timeout) >= 0)
                 drain_xroute_full_updates(ifp);
         }
 
