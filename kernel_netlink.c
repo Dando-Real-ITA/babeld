@@ -100,7 +100,29 @@ THE SOFTWARE.
     } while(0)
 
 int export_table = -1, import_tables[MAX_IMPORT_TABLES], import_table_count = 0;
+
+/* When set, filter_kernel_routes accepts RTPROT_BABEL routes and rejects all
+    others.  Used exclusively by kernel_dump_babel() for the installed-route
+    audit.  babeld is single-threaded so no locking is needed. */
+static int babel_route_audit_mode = 0;
+static int babel_route_tables[MAX_IMPORT_TABLES];
+static int babel_route_table_count = 0;
 int per_table_dumps = 0;
+
+void
+kernel_set_audit_route_tables(const int *tables, int table_count)
+{
+    if(tables == NULL || table_count <= 0) {
+        babel_route_table_count = 0;
+        return;
+    }
+
+    if(table_count > MAX_IMPORT_TABLES)
+        table_count = MAX_IMPORT_TABLES;
+
+    memcpy(babel_route_tables, tables, table_count * sizeof(int));
+    babel_route_table_count = table_count;
+}
 
 struct sysctl_setting {
     char *name;
@@ -1142,19 +1164,28 @@ kernel_route_flush_unreachable(int table,
 
     if(del_ipv4) {
         del_rta = RTA_NEXT(del_rta, del_len);
-        del_rta->rta_len = RTA_LENGTH(sizeof(struct in_addr));
+
+        del_rta->rta_len = RTA_LENGTH(4);
         del_rta->rta_type = RTA_DST;
-        memcpy(RTA_DATA(del_rta), dest + 12, sizeof(struct in_addr));
-    } else {
-        del_rta = RTA_NEXT(del_rta, del_len);
-        del_rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr));
-        del_rta->rta_type = RTA_DST;
-        memcpy(RTA_DATA(del_rta), dest, sizeof(struct in6_addr));
+        memcpy(RTA_DATA(del_rta), dest + 12, 4);
+
         if(del_use_src) {
             del_rta = RTA_NEXT(del_rta, del_len);
-            del_rta->rta_len = RTA_LENGTH(sizeof(struct in6_addr));
+            del_rta->rta_len = RTA_LENGTH(4);
             del_rta->rta_type = RTA_SRC;
-            memcpy(RTA_DATA(del_rta), src, sizeof(struct in6_addr));
+            memcpy(RTA_DATA(del_rta), src + 12, 4);
+        }
+    } else {
+        del_rta = RTA_NEXT(del_rta, del_len);
+        del_rta->rta_len = RTA_LENGTH(16);
+        del_rta->rta_type = RTA_DST;
+        memcpy(RTA_DATA(del_rta), dest, 16);
+
+        if(del_use_src) {
+            del_rta = RTA_NEXT(del_rta, del_len);
+            del_rta->rta_len = RTA_LENGTH(16);
+            del_rta->rta_type = RTA_SRC;
+            memcpy(RTA_DATA(del_rta), src, 16);
         }
     }
 
@@ -1761,9 +1792,20 @@ filter_kernel_routes(struct nlmsghdr *nh, struct kernel_route *route)
     rtm = (struct rtmsg*)NLMSG_DATA(nh);
     len -= NLMSG_LENGTH(0);
 
-    if(rtm->rtm_protocol == RTPROT_BABEL &&
-       nh->nlmsg_type != RTM_DELROUTE)
-        return 0;
+     if(babel_route_audit_mode) {
+          /* Audit mode: only accept RTPROT_BABEL routes from RTM_NEWROUTE
+              dumps; delete notifications are not needed for an existence
+              check and would confuse the callback. */
+          if(rtm->rtm_protocol != RTPROT_BABEL ||
+              nh->nlmsg_type != RTM_NEWROUTE)
+                return 0;
+     } else {
+          /* Normal mode: exclude routes we installed ourselves, but keep
+              RTM_DELROUTE so external deletions can be reconciled. */
+          if(rtm->rtm_protocol == RTPROT_BABEL &&
+              nh->nlmsg_type != RTM_DELROUTE)
+                return 0;
+     }
 
     /* Ignore cached routes, advertised by some kernels (linux 3.x). */
     if(rtm->rtm_flags & RTM_F_CLONED)
@@ -1791,9 +1833,17 @@ filter_kernel_routes(struct nlmsghdr *nh, struct kernel_route *route)
 /* This function should not return routes installed by us. */
 int
 kernel_dump(int operation, struct kernel_filter *filter)
+
 {
     int i, j, rc;
     int families[2] = { AF_INET6, AF_INET };
+    const int *tables = import_tables;
+    int table_count = import_table_count;
+
+    if(babel_route_audit_mode && babel_route_table_count > 0) {
+        tables = babel_route_tables;
+        table_count = babel_route_table_count;
+    }
 
     if(!nl_setup) {
         fprintf(stderr,"kernel_dump: netlink not initialized.\n");
@@ -1827,11 +1877,11 @@ kernel_dump(int operation, struct kernel_filter *filter)
         int len = NLMSG_ALIGN(sizeof(struct rtmsg)) + RTA_LENGTH(sizeof(int));
 
         if(operation & CHANGE_ROUTE) {
-            for (j = 0; j < import_table_count; j++) {
-                req.msg.rtm_table = import_tables[j] < 256 ? import_tables[j] : RT_TABLE_UNSPEC;
+            for(j = 0; j < table_count; j++) {
+                req.msg.rtm_table = tables[j] < 256 ? tables[j] : RT_TABLE_UNSPEC;
 
-                if (import_tables[j] >= 256) {
-                    *(int*)RTA_DATA(rta) = import_tables[j];
+                if(tables[j] >= 256) {
+                    *(int*)RTA_DATA(rta) = tables[j];
                     len = NLMSG_ALIGN(sizeof(struct rtmsg)) + RTA_LENGTH(sizeof(int));
                 } else {
                     len = NLMSG_ALIGN(sizeof(struct rtmsg));
@@ -1868,6 +1918,20 @@ kernel_dump(int operation, struct kernel_filter *filter)
     }
 
     return 0;
+}
+
+/* Like kernel_dump() but only yields RTPROT_BABEL routes (i.e. the routes
+   installed by this instance).  Used by audit_installed_routes() to verify
+   that installed babel_routes are still present in the kernel.  Must not
+   be called recursively or from within another kernel_dump() call. */
+int
+kernel_dump_babel(int operation, struct kernel_filter *filter)
+{
+    int rc;
+    babel_route_audit_mode = 1;
+    rc = kernel_dump(operation, filter);
+    babel_route_audit_mode = 0;
+    return rc;
 }
 
 static char *
