@@ -1040,3 +1040,230 @@ check_xroutes(int send_updates, int warn, int check_infinity)
     maxroutes = MIN(maxmaxroutes, 2 * maxroutes);
     goto again;
 }
+
+/* ---- installed-route audit ---- */
+
+struct audit_krt {
+    struct kernel_route *routes;
+    int count;
+    int max;
+    int hard_max;
+    int truncated;
+};
+
+static void
+audit_collect_route(int add, struct kernel_route *route, void *data)
+{
+    struct audit_krt *a = (struct audit_krt *)data;
+    struct kernel_route *new_routes;
+    int new_max;
+
+    (void)add;  /* always RTM_NEWROUTE in audit mode */
+
+    if(a->count >= a->max) {
+        if(a->max >= a->hard_max) {
+            a->truncated = 1;
+            return;
+        }
+
+        new_max = MIN(a->max * 2, a->hard_max);
+        if(new_max <= a->max) {
+            a->truncated = 1;
+            return;
+        }
+
+        new_routes = realloc(a->routes,
+                             new_max * sizeof(struct kernel_route));
+        if(new_routes == NULL) {
+            a->truncated = 1;
+            return;
+        }
+
+        a->routes = new_routes;
+        a->max = new_max;
+    }
+
+    a->routes[a->count++] = *route;
+}
+
+static int
+audit_route_present(const struct audit_krt *a,
+                    const unsigned char *prefix, unsigned char plen,
+                    const unsigned char *src_prefix, unsigned char src_plen,
+                    int table)
+{
+    int i;
+    for(i = 0; i < a->count; i++) {
+        const struct kernel_route *kr = &a->routes[i];
+        if(kr->plen == plen && kr->src_plen == src_plen &&
+           kr->table == table &&
+           memcmp(kr->prefix, prefix, 16) == 0 &&
+           memcmp(kr->src_prefix, src_prefix, 16) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int
+append_audit_table(int *tables, int *count, int table)
+{
+    int i;
+
+    for(i = 0; i < *count; i++) {
+        if(tables[i] == table)
+            return 1;
+    }
+
+    if(*count >= MAX_IMPORT_TABLES)
+        return 0;
+
+    tables[*count] = table;
+    (*count)++;
+    return 1;
+}
+
+static int
+collect_audit_tables_from_installed_routes(int *tables, int max_tables)
+{
+    struct route_stream *stream;
+    struct babel_route *route;
+    int table_count = 0;
+
+    (void)max_tables;
+
+    stream = route_stream(1);
+    if(stream == NULL)
+        return 0;
+
+    while((route = route_stream_next(stream)) != NULL) {
+        int i;
+
+        if(route->installed != 1 || route->installed_table_count <= 0)
+            continue;
+
+        for(i = 0; i < route->installed_table_count; i++) {
+            if(!append_audit_table(tables, &table_count,
+                                   route->installed_tables[i])) {
+                route_stream_done(stream);
+                return table_count;
+            }
+        }
+    }
+
+    route_stream_done(stream);
+    return table_count;
+}
+
+/* Verify that every babel_route marked as installed is actually present in
+   the kernel.  If a route is missing, uninstall it internally and call
+   consider_route() so it gets reinstalled (restoring the full ECMP group).
+
+   This is a fallback for cases where an RTM_DELROUTE notification was
+   missed (e.g. the deletion happened during a kernel_route_operation
+   window).  It runs at the same cadence as check_xroutes().
+
+    Audit table selection is derived from the currently installed routes
+    themselves (route->installed_tables[]), which covers custom install
+    targets used by install_filter.  If no installed-route tables are
+    available, kernel_dump_babel falls back to import_tables[]. */
+void
+audit_installed_routes(void)
+{
+    static int maxkroutes = 128;
+    const int max_audit_kroutes = 1000000;
+    struct audit_krt a;
+    struct kernel_filter filter = {0};
+    struct route_stream *stream;
+    struct babel_route *route;
+    int audit_tables[MAX_IMPORT_TABLES];
+    int audit_table_count;
+    int estimated = xroutes_estimate();
+    int initial_max;
+    int repaired = 0;
+
+    if(estimated < 0)
+        estimated = 0;
+
+    initial_max = MAX(maxkroutes, estimated + 8);
+    initial_max = MIN(initial_max, max_audit_kroutes);
+    initial_max = MAX(initial_max, 128);
+
+    a.routes = malloc(initial_max * sizeof(struct kernel_route));
+    if(a.routes == NULL) {
+        perror("malloc(audit_installed_routes)");
+        return;
+    }
+    a.count = 0;
+    a.max = initial_max;
+    a.hard_max = max_audit_kroutes;
+    a.truncated = 0;
+
+    filter.route = audit_collect_route;
+    filter.route_closure = &a;
+
+    audit_table_count =
+        collect_audit_tables_from_installed_routes(audit_tables,
+                                                   MAX_IMPORT_TABLES);
+    kernel_set_audit_route_tables(audit_tables, audit_table_count);
+
+    kernel_dump_babel(CHANGE_ROUTE, &filter);
+    kernel_set_audit_route_tables(NULL, 0);
+
+    /* Keep the next-call hint in sync with the capacity used this cycle. */
+    maxkroutes = a.max;
+
+    /* Incomplete snapshot: skip reconcile to avoid false missing repairs. */
+    if(a.truncated) {
+        debugf("audit_installed_routes: snapshot truncated at %d routes, "
+               "skipping reconcile this cycle.\n",
+               a.max);
+        free(a.routes);
+        return;
+    }
+
+    stream = route_stream(1);  /* installed primaries only */
+    if(stream == NULL) {
+        free(a.routes);
+        return;
+    }
+
+    while((route = route_stream_next(stream)) != NULL) {
+        int t;
+        int missing = 0;
+
+        if(route->installed != 1 || route->installed_table_count <= 0)
+            continue;
+
+        for(t = 0; t < route->installed_table_count; t++) {
+            if(!audit_route_present(&a,
+                                    route->src->prefix, route->src->plen,
+                                    route->src->src_prefix,
+                                    route->src->src_plen,
+                                    route->installed_tables[t])) {
+                missing = 1;
+                break;
+            }
+        }
+
+        if(missing) {
+            debugf("audit_installed_routes: %s missing from kernel "
+                   "(table %d); forcing resync.\n",
+                   format_prefix(route->src->prefix, route->src->plen),
+                   route->installed_tables[t < route->installed_table_count
+                                           ? t : 0]);
+            /* Clear internal installed state (ROUTE_FLUSH may return ESRCH
+               if the kernel entry was already deleted — that is harmless). */
+            uninstall_route(route);
+            /* Re-evaluate: installs best route for this prefix,
+               restoring the full ECMP group if applicable. */
+            consider_route(route);
+            repaired++;
+        }
+    }
+
+    route_stream_done(stream);
+    free(a.routes);
+
+    if(repaired > 0)
+        debugf("audit_installed_routes: repaired %d route(s).\n", repaired);
+}
