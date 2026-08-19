@@ -557,6 +557,9 @@ local_read(struct local_socket *s)
                 snprintf(reply, sizeof(reply), "Warning: couldn't check exported routes.\n");
             }
             break;
+        case CONFIG_ACTION_AUDIT_ROUTES:
+            audit_installed_routes();
+            break;
         default:
             snprintf(reply, sizeof(reply), "bad\n");
         }

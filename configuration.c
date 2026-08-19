@@ -1371,6 +1371,11 @@ parse_config_line(int c, gnc_t gnc, void *closure,
         if(c < -1 || !action_return)
             goto fail;
         *action_return = CONFIG_ACTION_CHECK_XROUTES;
+    } else if(strcmp(token, "audit_routes") == 0) {
+        c = skip_eol(c, gnc, closure);
+        if(c < -1 || !action_return)
+            goto fail;
+        *action_return = CONFIG_ACTION_AUDIT_ROUTES;
     } else if(strcmp(token, "include") == 0) {
         char *include_file = NULL;
         char *resolved_path = NULL;
