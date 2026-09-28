@@ -1123,13 +1123,11 @@ append_audit_table(int *tables, int *count, int table)
 }
 
 static int
-collect_audit_tables_from_installed_routes(int *tables, int max_tables)
+collect_audit_tables_from_installed_routes(int *tables)
 {
     struct route_stream *stream;
     struct babel_route *route;
     int table_count = 0;
-
-    (void)max_tables;
 
     stream = route_stream(1);
     if(stream == NULL)
@@ -1202,8 +1200,7 @@ audit_installed_routes(void)
     filter.route_closure = &a;
 
     audit_table_count =
-        collect_audit_tables_from_installed_routes(audit_tables,
-                                                   MAX_IMPORT_TABLES);
+        collect_audit_tables_from_installed_routes(audit_tables);
     kernel_set_audit_route_tables(audit_tables, audit_table_count);
 
     kernel_dump_babel(CHANGE_ROUTE, &filter);
@@ -1230,6 +1227,7 @@ audit_installed_routes(void)
     while((route = route_stream_next(stream)) != NULL) {
         int t;
         int missing = 0;
+        int missing_table = -1;
 
         if(route->installed != 1 || route->installed_table_count <= 0)
             continue;
@@ -1241,6 +1239,7 @@ audit_installed_routes(void)
                                     route->src->src_plen,
                                     route->installed_tables[t])) {
                 missing = 1;
+                missing_table = route->installed_tables[t];
                 break;
             }
         }
@@ -1249,8 +1248,7 @@ audit_installed_routes(void)
             debugf("audit_installed_routes: %s missing from kernel "
                    "(table %d); forcing resync.\n",
                    format_prefix(route->src->prefix, route->src->plen),
-                   route->installed_tables[t < route->installed_table_count
-                                           ? t : 0]);
+                   missing_table >= 0 ? missing_table : 0);
             /* Clear internal installed state (ROUTE_FLUSH may return ESRCH
                if the kernel entry was already deleted — that is harmless). */
             uninstall_route(route);
