@@ -417,6 +417,13 @@ interface_updown(struct interface *ifp, int up)
 
         if(IF_CONF(ifp, unicast) == CONFIG_YES)
             ifp->flags |= IF_UNICAST;
+        else if(IF_CONF(ifp, unicast) == CONFIG_NO)
+            ifp->flags &= ~IF_UNICAST;
+        else if(type == IF_TYPE_TUNNEL)
+            ifp->flags |= IF_UNICAST;
+        else
+            ifp->flags &= ~IF_UNICAST;
+
         if(IF_CONF(ifp, accept_bad_signatures) == CONFIG_YES)
             ifp->flags |= IF_ACCEPT_BAD_SIGNATURES;
         else

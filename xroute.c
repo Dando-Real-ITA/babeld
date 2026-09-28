@@ -43,6 +43,8 @@ THE SOFTWARE.
 
 static struct xroute *xroutes;
 static int numxroutes = 0, maxxroutes = 0;
+static int xroute_infinity_check_pending = 0;
+static int xroute_check_counter = 0;
 
 #define SELF_DELETE_SUPPRESS_MAX 8192
 #define SELF_DELETE_SUPPRESS_SEC 5
@@ -774,6 +776,12 @@ flush_duplicate_route(struct kernel_route *kroute) {
 }
 
 
+static void
+trigger_xroute_infinity_check(void)
+{
+    xroute_infinity_check_pending = 1;
+}
+
 void
 kernel_route_notify(int add, struct kernel_route *kroute, void *closure)
 {
@@ -781,6 +789,7 @@ kernel_route_notify(int add, struct kernel_route *kroute, void *closure)
     int i, rc;
 
     kroute->table = normalise_table(kroute->table);
+    trigger_xroute_infinity_check();
 
     debugf("Kernel route: %s %s (src_plen=%d, table=%d)",
            add ? "add" : "del", format_prefix(kroute->prefix, kroute->plen),
@@ -880,10 +889,24 @@ check_xroutes(int send_updates, int warn, int check_infinity)
     struct kernel_route *routes;
     struct filter_result filter_result;
     int numroutes;
+    int need_infinity = check_infinity || xroute_infinity_check_pending;
     static int maxroutes = 8;
     const int maxmaxroutes = 256 * 1024;
 
-    debugf("\nChecking kernel routes.\n");
+    if(!check_infinity && !xroute_infinity_check_pending) {
+        xroute_check_counter++;
+        if(xroute_check_counter >= 10) {
+            xroute_check_counter = 0;
+            /* Force a full reconciliation now, and keep the flag set so the
+               next pass also does the same in case churn arrived while this
+               scan was running. */
+            need_infinity = 1;
+            xroute_infinity_check_pending = 1;
+        }
+    }
+
+    debugf("\nChecking kernel routes (infinity=%s).\n",
+           need_infinity ? "yes" : "no");
 
  again:
     routes = calloc(maxroutes, sizeof(struct kernel_route));
@@ -932,8 +955,10 @@ check_xroutes(int send_updates, int warn, int check_infinity)
     /* Filter out invalid and duplicate routes before merge */
     int filtered_count = 0;
     for(i = 0; i < numroutes; i++) {
-        /* Skip routes with INFINITY metric */
-        if(!check_infinity && routes[i].metric >= INFINITY)
+        /* Skip routes with INFINITY metric in the cheap reconciliation pass,
+           but always include them in a repair cycle after churn or periodic
+           full sweep. */
+        if(!need_infinity && routes[i].metric >= INFINITY)
             continue;
         
         /* Skip martian prefixes */
@@ -1029,6 +1054,7 @@ check_xroutes(int send_updates, int warn, int check_infinity)
     }
 
     free(routes);
+    xroute_infinity_check_pending = 0;
     /* Set up maxroutes for the next call. */
     maxroutes = MIN(numroutes + 8, maxmaxroutes);
     return change;
