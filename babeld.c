@@ -864,6 +864,9 @@ babel_main(char **interface_names, int num_interface_names)
                 if(rc < 0)
                     fprintf(stderr, "Warning: couldn't check exported routes.\n");
 
+                if(periodic_due)
+                    audit_installed_routes();
+
                 if(addr_due) {
                     kernel_addr_changed = 0;
                     kernel_addr_change_due.tv_sec = 0;

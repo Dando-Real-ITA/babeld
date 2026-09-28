@@ -105,6 +105,8 @@ int kernel_route_multipath(int operation, int table,
                            int newtable,
                            const unsigned char *newpref_src);
 int kernel_dump(int operation, struct kernel_filter *filter);
+int kernel_dump_babel(int operation, struct kernel_filter *filter);
+void kernel_set_audit_route_tables(const int *tables, int table_count);
 int kernel_callback(struct kernel_filter *filter);
 int if_eui64(char *ifname, int ifindex, unsigned char *eui);
 int gettime(struct timeval *tv);
