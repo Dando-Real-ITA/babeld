@@ -19,6 +19,9 @@ OBJS = babeld.o net.o kernel.o util.o interface.o source.o neighbour.o \
        route.o xroute.o message.o resend.o configuration.o local.o \
        hmac.o rfc6234/sha224-256.o BLAKE2/ref/blake2s-ref.o
 
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
 babeld: $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o babeld $(OBJS) $(LDLIBS)
 

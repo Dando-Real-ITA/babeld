@@ -368,7 +368,8 @@ parse_net(const char *net, unsigned char *prefix_r, unsigned char *plen_r,
           int *af_r)
 {
     char buf[INET6_ADDRSTRLEN];
-    char *slash, *end;
+    const char *slash;
+    char *end;
     unsigned char prefix[16];
     long plen;
     int af;
