@@ -529,7 +529,7 @@ netlink_read(struct netlink *nl, struct netlink *nl_ignore, int answer,
                         "netlink_read: recvmsg(): No buffer space available, forcing resync.\n");
                 if(!answer && nl == &nl_listen) {
                     check_interfaces();
-                    if(check_xroutes(1, 0, 0) < 0)
+                    if(check_xroutes(1, 0) < 0)
                         fprintf(stderr,
                                 "Warning: couldn't resync exported routes after ENOBUFS.\n");
                 }

@@ -34,6 +34,10 @@ int mocked_kernel_multipath_calls = 0;
 int mocked_kernel_last_multipath_count = 0;
 int mocked_kernel_last_operation = -1;
 int mocked_kernel_last_new_metric = -1;
+struct kernel_addr *mocked_kernel_addresses = NULL;
+int mocked_kernel_address_count = 0;
+struct kernel_route *mocked_kernel_routes = NULL;
+int mocked_kernel_route_count = 0;
 
 int
 if_eui64(char *ifname, int ifindex, unsigned char *eui)
@@ -126,6 +130,38 @@ kernel_route_multipath(int operation, int table,
 int
 kernel_dump(int operation, struct kernel_filter *filter)
 {
+    int i;
+
+    if((operation & CHANGE_ADDR) && filter->addr) {
+        for(i = 0; i < mocked_kernel_address_count; i++)
+            filter->addr(1, &mocked_kernel_addresses[i], filter->addr_closure);
+    }
+    if((operation & CHANGE_ROUTE) && filter->route) {
+        for(i = 0; i < mocked_kernel_route_count; i++) {
+            if(mocked_kernel_routes[i].proto != RTPROT_BABEL)
+                filter->route(1, &mocked_kernel_routes[i], filter->route_closure);
+        }
+    }
+    return 0;
+}
+
+void
+kernel_set_audit_route_tables(const int *tables, int table_count)
+{
+    /* The test backend has no per-table dump optimisation. */
+}
+
+int
+kernel_dump_babel(int operation, struct kernel_filter *filter)
+{
+    int i;
+
+    if((operation & CHANGE_ROUTE) && filter->route) {
+        for(i = 0; i < mocked_kernel_route_count; i++) {
+            if(mocked_kernel_routes[i].proto == RTPROT_BABEL)
+                filter->route(1, &mocked_kernel_routes[i], filter->route_closure);
+        }
+    }
     return 0;
 }
 

@@ -49,6 +49,79 @@ extern int mocked_kernel_multipath_calls;
 extern int mocked_kernel_last_multipath_count;
 extern int mocked_kernel_last_operation;
 extern int mocked_kernel_last_new_metric;
+extern struct kernel_addr *mocked_kernel_addresses;
+extern int mocked_kernel_address_count;
+
+void
+check_xroutes_respects_redistribute_deny_test(void)
+{
+    struct kernel_addr addresses[2] = {0};
+    struct xroute *xroute;
+    struct filter_result result;
+    unsigned char loopback[16], denied[16];
+    unsigned char src_prefix[16] = {0};
+    unsigned int lo = if_nametoindex("lo");
+    char allow_rule[] =
+        "redistribute local if lo ip fd72:1fdc:5c49:1:1:1:117:0/112 allow\n";
+    char deny_rule[] =
+        "redistribute local ip fd72:1fdc:5c49:1:1:1:117:0/112 deny\n";
+    int i, rc, failed = 0;
+
+    if(lo == 0 ||
+       inet_pton(AF_INET6, "fd72:1fdc:5c49:1:1:1:117:1", loopback) != 1 ||
+       inet_pton(AF_INET6, "fd72:1fdc:5c49:1:1:1:117:3", denied) != 1 ||
+       parse_config_from_string(allow_rule, strlen(allow_rule), NULL) < 0 ||
+       parse_config_from_string(deny_rule, strlen(deny_rule), NULL) < 0) {
+        fprintf(stderr, "Failed reconciliation test setup.\n");
+        tests_failed++;
+        return;
+    }
+
+    memcpy(&addresses[0].addr, loopback, 16);
+    addresses[0].ifindex = lo;
+    memcpy(&addresses[1].addr, denied, 16);
+    addresses[1].ifindex = lo + 1; /* Not a configured Babel interface. */
+    mocked_kernel_addresses = addresses;
+    mocked_kernel_address_count = 2;
+
+    if(redistribute_filter(loopback, 128, zeroes, 0, lo,
+                           RTPROT_BABEL_LOCAL, &result) != 0 ||
+       redistribute_filter(denied, 128, zeroes, 0, lo + 1,
+                           RTPROT_BABEL_LOCAL, &result) != INFINITY)
+        failed = 1;
+
+    /* Repeated reconciliation must always produce the same eligible set. */
+    for(i = 0; i < 24; i++) {
+        rc = check_xroutes(0, 0);
+        xroute = find_xroute(loopback, 128, zeroes, 0);
+        if(rc < 0 || xroute == NULL || xroute->metric != 0 ||
+           find_xroute(denied, 128, zeroes, 0) != NULL)
+            failed = 1;
+    }
+
+    /* Repair a denied entry left by an older full check rather than keeping
+       it alive merely because the address still exists in the kernel. */
+    if(find_xroute(denied, 128, zeroes, 0) == NULL &&
+    add_xroute(denied, 128, src_prefix, 0, INFINITY, lo + 1,
+                  RTPROT_BABEL_LOCAL, 254) < 0)
+        failed = 1;
+    if(check_xroutes(0, 0) < 0 ||
+       find_xroute(denied, 128, zeroes, 0) != NULL)
+        failed = 1;
+
+    /* An allowed address must also disappear when it is actually removed. */
+    mocked_kernel_address_count = 0;
+    if(check_xroutes(0, 0) < 0 ||
+       find_xroute(loopback, 128, zeroes, 0) != NULL ||
+       find_xroute(denied, 128, zeroes, 0) != NULL)
+        failed = 1;
+    mocked_kernel_addresses = NULL;
+
+    if(failed) {
+        fprintf(stderr, "Reconciliation retained or re-added a denied address.\n");
+        tests_failed++;
+    }
+}
 
 int sign(int x) {
     if(x > 0)
@@ -3142,6 +3215,8 @@ void route_test_suite(void)
                    "refresh_promotes_member_preserving_group_test");
     run_route_test(refresh_installed_ranks_preserves_other_groups_test,
                    "refresh_installed_ranks_preserves_other_groups_test");
+    run_test(check_xroutes_respects_redistribute_deny_test,
+             "check_xroutes_respects_redistribute_deny_test");
     fprintf(stderr, "-----------------------------------------------\n");
     fprintf(stderr, "Executed tests\n");
 }

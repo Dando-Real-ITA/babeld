@@ -55,5 +55,5 @@ void note_self_kernel_route_delete(const unsigned char *prefix,
                                    int table,
                                    int metric);
 void kernel_route_notify(int add, struct kernel_route *route, void *closure);
-int check_xroutes(int send_updates, int warn, int check_infinity);
+int check_xroutes(int send_updates, int warn);
 void audit_installed_routes(void);

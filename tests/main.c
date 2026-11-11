@@ -25,8 +25,15 @@ THE SOFTWARE.
 #include "test_utilities.h"
 #include "util_test.h"
 
+#include <string.h>
+
 int main(int argc, char **argv)
 {
+    if(argc == 2 && strcmp(argv[1], "--xroute-reconcile") == 0) {
+        run_test(check_xroutes_respects_redistribute_deny_test,
+                 "check_xroutes_respects_redistribute_deny_test");
+        return tests_failed;
+    }
     run_suite(util_test_suite, "util.c");
     run_suite(hmac_test_suite, "hmac.c");
     run_suite(route_test_suite, "route.c");

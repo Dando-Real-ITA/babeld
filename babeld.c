@@ -645,7 +645,7 @@ babel_main(char **interface_names, int num_interface_names)
 
     check_interfaces();
 
-    rc = check_xroutes(0, 0, 0);
+    rc = check_xroutes(0, 0);
     if(rc < 0)
         fprintf(stderr, "Warning: couldn't check exported routes.\n");
 
@@ -854,7 +854,7 @@ babel_main(char **interface_names, int num_interface_names)
                 check_interfaces();
 
             if(addr_due || periodic_due) {
-                rc = check_xroutes(1, !(addr_due || kernel_addr_changed), 0);
+                rc = check_xroutes(1, !(addr_due || kernel_addr_changed));
                 if(rc < 0)
                     fprintf(stderr, "Warning: couldn't check exported routes.\n");
 

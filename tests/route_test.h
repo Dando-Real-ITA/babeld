@@ -21,3 +21,4 @@
    */
 void route_test_suite(void);
 void kernel_delete_babel_proto_flushes_matching_xroute_test(void);
+void check_xroutes_respects_redistribute_deny_test(void);
