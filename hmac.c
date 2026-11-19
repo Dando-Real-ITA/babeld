@@ -248,6 +248,9 @@ compare_hmac(const unsigned char *src, const unsigned char *dst,
     unsigned char buf[MAX_DIGEST_LEN];
     int len;
 
+    if(hmaclen < 0 || hmaclen > MAX_DIGEST_LEN)
+        return 0;
+
     len = compute_hmac(src, dst, packet, packet + 4, bodylen, key, buf);
     return len == hmaclen && (memcmp(buf, hmac, hmaclen) == 0);
 }
