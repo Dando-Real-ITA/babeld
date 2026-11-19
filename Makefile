@@ -1,13 +1,22 @@
+# 2026-11-19 20:34:25
+
 PREFIX = /usr/local
 MANDIR = $(PREFIX)/share/man
 
 CDEBUGFLAGS = -Os -g -Wall
 
-LDFLAGS += -rdynamic
+LDFLAGS += -rdynamic -flto=auto
 
 DEFINES = $(PLATFORM_DEFINES)
 
-CFLAGS = $(CDEBUGFLAGS) $(DEFINES) $(EXTRA_DEFINES)
+CFLAGS += $(CDEBUGFLAGS) $(DEFINES) $(EXTRA_DEFINES)
+CFLAGS += -march=native -flto=auto
+
+# Use mold automatically when it is installed.
+MOLD = $(shell command -v mold 2>/dev/null)
+ifneq ($(strip $(MOLD)),)
+LDFLAGS += -fuse-ld=mold
+endif
 
 LDLIBS = -lrt
 
@@ -50,7 +59,8 @@ all: babeld babeld.man
 o_files: $(OBJS)
 
 test:
-	$(MAKE) o_files CFLAGS+=-DNO_MAIN CFLAGS+=-DMOCKED_KERNEL
+	$(MAKE) clean
+	$(MAKE) o_files CFLAGS="$(CFLAGS) -DNO_MAIN -DMOCKED_KERNEL"
 	cd tests/ && $(MAKE) && ./main > /dev/null && $(MAKE) clean
 
 install.minimal: babeld
